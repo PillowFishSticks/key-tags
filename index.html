@@ -287,7 +287,7 @@ async function answerOffer(id, yes) {
 }
 
 /* one active NFC session at a time */
-let session = null, idleCtrl = null;
+let session = null, idleCtrl = null, pegWaiter = null;
 function stopIdle() { if (idleCtrl) { idleCtrl.abort(); idleCtrl = null; } }
 function stopSession() { if (session) { session.abort(); session = null; } stopIdle(); }
 
@@ -297,9 +297,9 @@ async function nfcAllowed() {
   try { return (await navigator.permissions.query({ name: "nfc" })).state === "granted"; } catch { return false; }
 }
 /* on ordinary pages: tapping a key opens its vehicle, tapping a peg shows the peg (inside the app, no new tab) */
-async function startIdle() {
+async function startIdle(force) {
   stopIdle();
-  if (!(await nfcAllowed())) return;
+  if (!force && !(await nfcAllowed())) return;
   const ctrl = new AbortController(); idleCtrl = ctrl;
   const reader = new NDEFReader();
   try { await reader.scan({ signal: ctrl.signal }); } catch { if (idleCtrl === ctrl) idleCtrl = null; return; }
@@ -308,6 +308,7 @@ async function startIdle() {
     if (idleCtrl !== ctrl || Date.now() - last < 2500) return;
     last = Date.now();
     const t = readTag(e);
+    if (t.peg && pegWaiter) { buzz(true); pegWaiter(t.peg).catch(err => toast("Couldn't save: " + err.message)); return; }
     if (t.key) { buzz(true); location.hash = `#/v/${t.key.vehicleId}/k/${t.key.id}`; }
     else if (t.peg) { buzz(true); location.hash = `#/peg/${t.peg.id}`; }
     else toast("That sticker isn't registered");
@@ -496,12 +497,11 @@ function keyActions(k) {
   const offer = db.offers.find(o => o.keyId === k.id);
   if (!me()) return "";
   if (who === me()) return `
-      <div class="row" style="margin-top:10px;gap:8px">
-        <button class="primary grow" data-act="puton" data-k="${k.id}">Put on board</button>
-        <button class="grow" data-act="give" data-k="${k.id}">Hand over</button>
-      </div>
-      ${offer ? `<div class="muted" style="margin-top:6px">Waiting for ${esc(offer.to)} to accept</div>` : ""}
-      <div class="qa" id="qa_${k.id}"></div>`;
+      <button class="primary big" style="margin-top:10px" data-act="puton" data-k="${k.id}">Put on board</button>
+      <div class="qa" id="qa_${k.id}"></div>
+      <div class="row" style="margin-top:8px;gap:8px">${PEOPLE.filter(p => p !== me()).map(p =>
+        `<button class="grow" data-act="give" data-to="${p}" data-k="${k.id}">Give to ${p}</button>`).join("")}</div>
+      ${offer ? `<div class="muted" style="margin-top:6px">Waiting for ${esc(offer.to)} to accept</div>` : ""}`;
   const label = place ? "Take it" : who ? `Take from ${esc(who)}` : "Take it";
   return `<button class="primary big" style="margin-top:10px" data-act="take" data-k="${k.id}">${label}</button>`;
 }
@@ -546,26 +546,34 @@ function viewVehicle(vid) {
       }
       const box = $("#qa_" + k.id);
       if (act === "puton") {
-        box.innerHTML = `<div class="chips" style="margin-top:10px">${db.locations.map(l => `<button data-board="${l.id}">${esc(l.name)}</button>`).join("")}</div>
-          <div class="row" style="margin-top:8px"><input id="pegn_${k.id}" type="number" min="1" placeholder="Peg no. (optional)" style="width:170px"><button class="primary grow" id="puton_${k.id}" disabled>Save</button></div>`;
-        let board = null;
-        box.querySelectorAll("[data-board]").forEach(c => c.onclick = () => {
-          board = boardById(c.dataset.board); box.querySelectorAll("[data-board]").forEach(x => x.classList.toggle("on", x === c)); $("#puton_" + k.id).disabled = false;
-        });
-        $("#puton_" + k.id).onclick = async () => {
-          const n = parseInt($("#pegn_" + k.id).value, 10) || null;
-          await saveMove(k, "in", { location: board.name, peg: n, person: me() });
-          toast(`✓ Key ${k.n} on ${board.name}${n ? " · peg " + n : ""}`); again();
+        const manual = () => {
+          box.innerHTML = `<div class="muted" style="margin-top:10px">Which board?</div>
+            <div class="chips" style="margin-top:6px">${db.locations.map(l => `<button data-board="${l.id}">${esc(l.name)}</button>`).join("")}</div>`;
+          box.querySelectorAll("[data-board]").forEach(c => c.onclick = async () => {
+            const l = boardById(c.dataset.board); pegWaiter = null;
+            await saveMove(k, "in", { location: l.name, peg: null, person: me() });
+            toast(`✓ Key ${k.n} on ${l.name}`); again();
+          });
         };
+        if (!NFC) { manual(); return; }
+        pegWaiter = async peg => {
+          pegWaiter = null;
+          const l = boardById(peg.board);
+          await saveMove(k, "in", { location: l ? l.name : "Board", peg: peg.n, person: me() });
+          toast(`✓ Key ${k.n} on ${pegLabel(peg)}`); again();
+        };
+        if (!idleCtrl) await startIdle(true);
+        b.style.display = "none";
+        box.innerHTML = `<div class="listen" style="margin-top:10px"><div class="dot"></div><div class="grow">Now tap the peg you're hanging it on</div>
+            <button class="danger" id="cancelpeg" style="color:var(--muted)">Cancel</button></div>
+          <a href="javascript:void 0" id="nopeg" class="muted" style="display:block;margin-top:8px;font-size:14px">No sticker on the peg?</a>`;
+        $("#cancelpeg").onclick = () => { pegWaiter = null; again(); };
+        $("#nopeg").onclick = manual;
       }
       if (act === "give") {
-        box.innerHTML = `<div class="muted" style="margin-top:10px">Hand to — they'll get an Accept button:</div>
-          <div class="chips" style="margin-top:6px">${PEOPLE.filter(p => p !== me()).map(p => `<button data-to="${p}">${p}</button>`).join("")}</div>`;
-        box.querySelectorAll("[data-to]").forEach(c => c.onclick = async () => {
-          const o = { id: "o_" + k.id, keyId: k.id, from: me(), to: c.dataset.to, at: Date.now() };
-          await store.put("offers", o); db.offers = db.offers.filter(x => x.id !== o.id).concat(o);
-          toast(`Sent — waiting for ${o.to} to accept`); again();
-        });
+        const o = { id: "o_" + k.id, keyId: k.id, from: me(), to: b.dataset.to, at: Date.now() };
+        await store.put("offers", o); db.offers = db.offers.filter(x => x.id !== o.id).concat(o);
+        toast(`Sent — ${o.to} gets an Accept button`); again();
       }
     } catch (err) { toast("Couldn't save: " + err.message); }
   });
@@ -1152,6 +1160,7 @@ function render() {
 }
 const ownsNfc = h => /^#\/(do|pegs|book)\//.test(h) || h.startsWith("#/book");   // these pages run their own scanning
 function route() {
+  pegWaiter = null;
   stopSession(); if (!ready) return; render(); window.scrollTo(0, 0);
   if (!ownsNfc(location.hash)) startIdle();
 }
