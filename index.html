@@ -89,6 +89,18 @@ a.vlink{color:inherit;text-decoration:none}
 #track.on{display:block}
 #map{height:55vh;min-height:300px;border-radius:var(--radius);border:1px solid var(--line);margin-bottom:12px;z-index:0}
 .mlabel{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:2px 6px;font-weight:700;font-size:12px;box-shadow:0 1px 3px #0003}
+.pegs{display:grid;grid-template-columns:repeat(var(--cols,10),1fr);gap:4px;margin-top:10px}
+.peg{aspect-ratio:1;border:1px solid var(--line);border-radius:6px;font-size:11px;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--muted);cursor:pointer;padding:0;font-weight:600}
+.peg.full{background:var(--good-bg);color:var(--good);border-color:var(--good)}
+.peg.notag{opacity:.35}
+.peg.hit{outline:3px solid var(--accent);outline-offset:1px;background:var(--accent);color:var(--accent-ink)}
+.found{font-size:17px;font-weight:700}
+#offers{max-width:640px;margin:8px auto 0}
+.offer{background:var(--accent);color:var(--accent-ink);border-radius:12px;padding:10px 12px;margin-bottom:6px}
+.offer .row{margin-top:8px;gap:8px}
+.offer button{flex:1;padding:10px}
+.offer .yes{background:var(--card);color:var(--ink)}
+.offer .no{background:transparent;color:var(--accent-ink);border:1px solid var(--accent-ink)}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:15px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%}
 #toast.show{opacity:1}
 </style>
@@ -106,6 +118,7 @@ a.vlink{color:inherit;text-decoration:none}
     <a href="#/vehicles" data-nav="vehicles">Vehicles</a>
   </nav>
   <div id="track"></div>
+  <div id="offers"></div>
 </header>
 <main id="app"></main>
 <div id="toast"></div>
@@ -164,10 +177,10 @@ const store = {
   }
 };
 
-let db = { vehicles: [], keys: [], events: [], locations: [], pos: [] };
+let db = { vehicles: [], keys: [], events: [], locations: [], pos: [], pegs: [], offers: [] };
 async function load() {
-  const [vehicles, keys, events, locations, pos] = await Promise.all(["vehicles", "keys", "events", "locations", "pos"].map(k => store.all(k)));
-  db = { vehicles, keys, events, locations, pos };
+  const [vehicles, keys, events, locations, pos, pegs, offers] = await Promise.all(["vehicles", "keys", "events", "locations", "pos", "pegs", "offers"].map(k => store.all(k)));
+  db = { vehicles, keys, events, locations, pos, pegs, offers };
   if (!db.locations.length) {
     for (const [i, n] of ["Key board 1", "Key board 2", "Key board 3"].entries()) {
       const l = { id: "l_" + i, name: n, order: i }; db.locations.push(l); await store.put("locations", l);
@@ -195,7 +208,7 @@ function keyStatus(k) {
   const e = lastEvent(k.id);
   if (!e) return `<span class="pill new">Not scanned yet</span>`;
   return e.action === "in"
-    ? `<span class="pill in">On ${esc(e.location)}</span>`
+    ? `<span class="pill in">On ${esc(e.location)}${e.peg ? " · peg " + e.peg : ""}</span>`
     : `<span class="pill out">With ${esc(holder(e))}</span>`;
 }
 
@@ -203,7 +216,8 @@ function holder(e) { return e.action === "handover" ? e.to : e.person; }
 function describe(e, what) {
   if (e.action === "bookin") return `<b>${esc(e.person)}</b> booked in ${what}`;
   if (e.action === "handover") return `<b>${esc(e.person)}</b> handed ${what} to <b>${esc(e.to)}</b>`;
-  return `<b>${esc(e.person)}</b> ${e.action === "out" ? "took" : "put"} ${what} ${e.action === "out" ? "from" : "on"} ${esc(e.location)}`;
+  const where = e.location ? ` ${e.action === "out" ? "from" : "on"} ${esc(e.location)}${e.peg ? " · peg " + e.peg : ""}` : "";
+  return `<b>${esc(e.person)}</b> ${e.action === "out" ? "took" : "put"} ${what}${where}`;
 }
 
 /* read a tag: its serial + the key id written in its URL (if any) */
@@ -215,7 +229,62 @@ function readTag(e) {
   const m = url.match(/#\/v\/([^/]+)\/k\/([^/?#]+)/);
   const serial = e.serialNumber || "";
   const key = (m && db.keys.find(k => k.id === m[2])) || (serial && db.keys.find(k => k.serial === serial)) || null;
-  return { serial, url, key, vid: m ? m[1] : null };
+  const pm = url.match(/#\/peg\/([^/?#]+)/);
+  const peg = key ? null : ((pm && db.pegs.find(p => p.id === pm[1])) || (serial && db.pegs.find(p => p.serial === serial)) || null);
+  return { serial, url, key, peg, vid: m ? m[1] : null };
+}
+
+/* ---------- boards & pegs helpers ---------- */
+const boardById = id => db.locations.find(l => l.id === id);
+const pegCount = l => l.pegCount || 50;
+const pegCols = l => l.cols || 10;
+const pegLabel = p => { const l = boardById(p.board); return `${l ? l.name : "Board"} · peg ${p.n}`; };
+const pegUrl = id => `${PUBLIC_URL}#/peg/${id}`;
+/* where a key is right now: { board, peg } if it's on a board, else null */
+function keyPlace(k) { const e = lastEvent(k.id); return e && e.action === "in" ? { board: e.location, peg: e.peg || null } : null; }
+/* which key (if any) is hanging on a given board + peg */
+function keyOnPeg(boardName, n) { return db.keys.find(k => { const p = keyPlace(k); return p && p.board === boardName && p.peg === n; }) || null; }
+async function saveMove(k, action, extra) {
+  const prev = keyPlace(k);
+  const ev = { id: rid("e_"), keyId: k.id, vehicleId: k.vehicleId, action, location: "", peg: null, to: "", person: extra.person || me() || "Someone", at: Date.now(), ...extra };
+  if (action === "out" && prev) { ev.location = prev.board; ev.peg = prev.peg; }
+  await store.put("events", ev); db.events.push(ev);
+  stampPos(k, action === "in" ? "board" : "held"); ensureTracking();
+  return ev;
+}
+
+/* who has a key right now (person name), or null if it's on a board / never scanned */
+function keyHolder(k) { const e = lastEvent(k.id); return e && e.action !== "in" ? holder(e) : null; }
+
+/* hand-overs wait for the other person to accept */
+let seenOffers = new Set();
+function renderOffers() {
+  const el = $("#offers"); if (!el) return;
+  const mine = (db.offers || []).filter(o => o.to === me());
+  const fresh = mine.some(o => !seenOffers.has(o.id));
+  mine.forEach(o => seenOffers.add(o.id));
+  if (fresh) buzz(true);
+  el.innerHTML = mine.map(o => {
+    const k = db.keys.find(x => x.id === o.keyId), v = k && vehicle(k.vehicleId);
+    return `<div class="offer"><b>🤝 ${esc(o.from)}</b> wants to hand you <b>${esc(v?.vrm || "a key")}</b>${k ? ` key ${k.n}` : ""}
+      <div class="row"><button class="yes" data-acc="${o.id}">Accept</button><button class="no" data-dec="${o.id}">Decline</button></div></div>`;
+  }).join("");
+  el.querySelectorAll("[data-acc]").forEach(b => b.onclick = () => answerOffer(b.dataset.acc, true));
+  el.querySelectorAll("[data-dec]").forEach(b => b.onclick = () => answerOffer(b.dataset.dec, false));
+}
+async function answerOffer(id, yes) {
+  const o = db.offers.find(x => x.id === id); if (!o) return;
+  const k = db.keys.find(x => x.id === o.keyId);
+  try {
+    await store.del("offers", id); db.offers = db.offers.filter(x => x.id !== id);
+    if (yes) {
+      if (!k) toast("That key isn't registered any more");
+      else if (keyHolder(k) !== o.from) toast(`${o.from} doesn't have that key any more — not handed over`);
+      else { await saveMove(k, "handover", { person: o.from, to: me() }); toast(`✓ You now have ${vehicle(k.vehicleId)?.vrm || "the key"} key ${k.n}`); }
+    } else toast("Declined");
+  } catch (err) { toast("Couldn't save: " + err.message); }
+  renderOffers();
+  if (!session) { const y = window.scrollY; render(); window.scrollTo(0, y); }
 }
 
 /* one active NFC session at a time */
@@ -283,11 +352,12 @@ function goLive() {
 }
 async function refresh() {
   try { await load(); } catch { return; }
+  renderOffers();
   // don't redraw mid-scan or while someone is typing; the data is still updated underneath
   const typing = document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName);
   if (session || typing || document.querySelector("#reg .panel")) return;
   ensureTracking();
-  if (currentView === "map") { updateMap(); return; }
+  if (currentView === "map") { updateMap(); return; }   // updates in place, search box keeps focus
   const y = window.scrollY; render(); window.scrollTo(0, y);
 }
 
@@ -435,42 +505,81 @@ function viewVehicle(vid) {
   };
 }
 
-/* ---------- where are the keys: by board / by person ---------- */
-let keysTab = "board";
+/* ---------- where are the keys: boards as peg grids, people, and reg search ---------- */
+let keysTab = "board", keysQuery = "";
+const normReg = r => String(r || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+function matchingKeys(q) {
+  const n = normReg(q); if (!n) return [];
+  return db.keys.filter(k => { const v = vehicle(k.vehicleId); return v && (normReg(v.vrm).includes(n) || normReg(v.name).includes(n)); });
+}
+function whereText(k) {
+  const e = lastEvent(k.id);
+  if (!e) return "Not scanned yet";
+  if (e.action === "in") return `${e.location}${e.peg ? " · peg " + e.peg : " · peg unknown"}`;
+  return `With ${holder(e)}`;
+}
 function viewKeys() {
   setNav("keys");
-  const where = new Map(), holding = new Map();
-  for (const p of PEOPLE) holding.set(p, []);
+  const holding = new Map(); for (const p of PEOPLE) holding.set(p, []);
+  const loose = new Map();
   for (const k of db.keys) {
-    const e = lastEvent(k.id);
-    if (!e) continue;
-    if (e.action === "in") { if (!where.has(e.location)) where.set(e.location, []); where.get(e.location).push(k); }
+    const e = lastEvent(k.id); if (!e) continue;
+    if (e.action === "in") { if (!e.peg) { if (!loose.has(e.location)) loose.set(e.location, []); loose.get(e.location).push(k); } }
     else { const h = holder(e); if (!holding.has(h)) holding.set(h, []); holding.get(h).push(k); }
   }
-  const keyRow = k => {
-    const v = vehicle(k.vehicleId);
+  const keyRow = k => { const v = vehicle(k.vehicleId);
     return `<a class="vlink row" href="#/v/${k.vehicleId}" style="padding:10px 0;border-top:1px solid var(--line)">
-      <span class="plate">${esc(v?.vrm || "?")}</span>
-      <span class="grow">${esc(v?.name || "Unknown")}</span>
-      <span class="muted">Key ${k.n}</span></a>`;
-  };
-  const sortKeys = ks => ks.sort((a, b) => (vehicle(a.vehicleId)?.name || "").localeCompare(vehicle(b.vehicleId)?.name || "") || a.n - b.n);
-  const block = (title, keys, cls, icon) => `<div class="card">
-      <div class="row" style="margin-bottom:4px"><b class="grow">${icon} ${esc(title)}</b>
-        <span class="pill ${cls}">${keys.length} key${keys.length === 1 ? "" : "s"}</span></div>
-      ${keys.length ? sortKeys(keys).map(keyRow).join("") : `<div class="muted">No keys</div>`}
+      <span class="plate">${esc(v?.vrm || "?")}</span><span class="grow">${esc(v?.name || "Unknown")}</span><span class="muted">Key ${k.n}</span></a>`; };
+  const boardCard = l => {
+    const tagged = new Set(db.pegs.filter(p => p.board === l.id).map(p => p.n));
+    const onIt = db.keys.filter(k => { const p = keyPlace(k); return p && p.board === l.name; });
+    let cells = "";
+    for (let n = 1; n <= pegCount(l); n++) {
+      const k = keyOnPeg(l.name, n);
+      cells += `<button class="peg ${k ? "full" : ""} ${tagged.has(n) ? "" : "notag"}" data-n="${n}" ${k ? `data-k="${k.id}"` : ""}>${n}</button>`;
+    }
+    const unk = loose.get(l.name) || [];
+    return `<div class="card">
+      <div class="row"><b class="grow">🗂 ${esc(l.name)}</b><span class="pill in">${onIt.length} key${onIt.length === 1 ? "" : "s"}</span>
+        <a href="#/pegs/${l.id}" style="font-size:14px">Set up pegs</a></div>
+      <div class="pegs" style="--cols:${pegCols(l)}">${cells}</div>
+      <div class="pegdetail muted" style="margin-top:8px;min-height:1.4em"></div>
+      ${unk.length ? `<div class="muted" style="margin-top:6px">Peg unknown:</div>${unk.map(keyRow).join("")}` : ""}
     </div>`;
-  const boards = [...db.locations.map(l => l.name), ...[...where.keys()].filter(n => !db.locations.some(l => l.name === n))];
+  };
   $("#app").innerHTML = `
     <h1>Where are the keys</h1>
-    <div class="seg" style="margin-bottom:14px">
+    <input id="q" placeholder="🔍 Find a reg, e.g. AB12" value="${esc(keysQuery)}" autocomplete="off" style="font-size:18px;text-transform:uppercase">
+    <div id="results"></div>
+    <div class="seg" style="margin:14px 0">
       <button data-t="board" class="${keysTab === "board" ? "on" : ""}">On the boards</button>
       <button data-t="person" class="${keysTab === "person" ? "on" : ""}">With people</button>
     </div>
     ${keysTab === "board"
-      ? boards.map(n => block(n, where.get(n) || [], "in", "🗂")).join("")
-      : [...holding].map(([p, ks]) => block(p === me() ? p + " (you)" : p, ks, "out", "👤")).join("")}`;
+      ? db.locations.map(boardCard).join("") + `<button class="big" id="addboard">+ Add a board</button>`
+      : [...holding].map(([p, ks]) => `<div class="card"><div class="row" style="margin-bottom:4px"><b class="grow">👤 ${esc(p === me() ? p + " (you)" : p)}</b>
+          <span class="pill out">${ks.length} key${ks.length === 1 ? "" : "s"}</span></div>${ks.length ? ks.map(keyRow).join("") : `<div class="muted">No keys</div>`}</div>`).join("")}`;
+  const showResults = () => {
+    keysQuery = $("#q").value;
+    const ks = matchingKeys(keysQuery);
+    document.querySelectorAll(".peg.hit").forEach(c => c.classList.remove("hit"));
+    for (const k of ks) { const c = document.querySelector(`.peg[data-k="${k.id}"]`); if (c) c.classList.add("hit"); }
+    $("#results").innerHTML = !normReg(keysQuery) ? "" : ks.length ? ks.map(k => { const v = vehicle(k.vehicleId);
+      return `<a class="vlink card row" href="#/v/${k.vehicleId}" style="margin-top:8px"><span class="plate">${esc(v.vrm)}</span>
+        <span class="grow">Key ${k.n}</span><span class="found">${esc(whereText(k))}</span></a>`; }).join("")
+      : `<div class="muted" style="margin-top:8px">No keys match "${esc(keysQuery)}"</div>`;
+  };
+  $("#q").oninput = showResults; showResults();
   document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { keysTab = b.dataset.t; viewKeys(); });
+  document.querySelectorAll(".peg").forEach(c => c.onclick = () => {
+    const k = c.dataset.k && db.keys.find(x => x.id === c.dataset.k), v = k && vehicle(k.vehicleId);
+    c.closest(".card").querySelector(".pegdetail").innerHTML = `Peg ${c.dataset.n}: ` + (k ? `<a href="#/v/${k.vehicleId}"><b>${esc(v?.vrm || "?")}</b> key ${k.n}</a>` : "empty") + (c.classList.contains("notag") ? " · no sticker yet" : "");
+  });
+  if ($("#addboard")) $("#addboard").onclick = async () => {
+    const n = (prompt("New board name, e.g. Key board 4") || "").trim(); if (!n) return;
+    const l = { id: rid("l_"), name: n, order: db.locations.length, pegCount: 50, cols: 10 };
+    await store.put("locations", l); db.locations.push(l); viewKeys();
+  };
 }
 
 /* ---------- register keys ---------- */
@@ -522,6 +631,7 @@ async function runRegister(host, v, count) {
     try {
       if (t.key && t.key.vehicleId === v.id) log(`Already registered as key ${t.key.n} — skipped`, "warn");
       else if (t.key) log(`Belongs to ${vlabel(vehicle(t.key.vehicleId))} — not registered. Release it there first.`, "bad");
+      else if (t.peg) log(`That's a peg sticker (${pegLabel(t.peg)}) — use a different sticker for keys`, "bad");
       else {
         const k = { id: rid("k_"), serial: t.serial, vehicleId: v.id, n: (keysFor(v.id).at(-1)?.n || 0) + 1, at: Date.now() };
         await reader.write({ records: [{ recordType: "url", data: tagUrl(v.id, k.id) }] }, { signal: ctrl.signal });
@@ -552,10 +662,11 @@ function viewActions() {
     <h1>Hi ${esc(me() || "there")} 👋</h1>
     <div class="tiles">
       ${tile("#/book", "🚗", "Book in", "New vehicle, register its keys", "wide accent")}
-      ${tile("#/do/in", "📥", "Put on board", "Keys onto a key board")}
-      ${tile("#/do/out", "📤", "Take from board", "Keys off a key board")}
-      ${tile("#/do/check", "🔍", "Check a key", "Whose key is this?")}
-      ${tile("#/do/handover", "🤝", "Hand over", "Give keys to someone")}
+      ${tile("#/do/station", "📟", "Board station", "Phone at the board — tap key, tap peg", "wide")}
+      ${tile("#/do/in", "📥", "Put on board", "Tap key, then peg")}
+      ${tile("#/do/out", "📤", "Take from board", "Tap the key")}
+      ${tile("#/do/check", "🔍", "Check", "Whose key? What's on this peg?")}
+      ${tile("#/do/handover", "🤝", "Hand over", "They accept on their phone")}
       ${tile("#/keys", "🗂", "Where are the keys", "Every board, every person")}
       ${tile("#/map", "🗺", "Map", "See keys live on a map")}
       ${tile("#/do/unregister", "🧹", "Unregister", "Free up a sticker to reuse", "wide")}
@@ -605,35 +716,55 @@ async function startReader(onTag) {
 }
 
 const JOBS = {
-  in:       { title: "Put keys on a board",    ask: "Which board?",               tap: "Tap each key on your phone" },
-  out:      { title: "Take keys from a board", ask: "Which board?",               tap: "Tap each key on your phone" },
-  handover: { title: "Hand keys over",         ask: "Who are you giving them to?", tap: "Tap each key on your phone" },
-  check:    { title: "Check a key",            ask: "",                            tap: "Tap a key on your phone" },
-  unregister: { title: "Unregister a sticker", ask: "",                            tap: "Tap the sticker on your phone" },
+  station:  { title: "Board station",          ask: "Who's scanning?",              tap: "Tap a key, then the peg to hang it on — or tap a key to take it" },
+  in:       { title: "Put keys on a board",    ask: "",                             tap: "Tap the key, then the peg you hang it on" },
+  out:      { title: "Take keys from a board", ask: "",                             tap: "Tap each key you take" },
+  handover: { title: "Hand keys over",         ask: "Who are you giving them to?",  tap: "Tap each key you're handing over" },
+  check:    { title: "Check a key or peg",     ask: "",                             tap: "Tap a key or a peg" },
+  unregister: { title: "Unregister a sticker", ask: "",                             tap: "Tap the sticker on your phone" },
 };
 
 function viewDo(mode) {
   const job = JOBS[mode];
   if (!job) { viewActions(); return; }
   setNav("home");
-  let choice = null, paused = false;
-  const solo = mode === "check" || mode === "unregister";   // no board/person to pick first
-  const opts = mode === "handover" ? PEOPLE.filter(p => p !== me()) : db.locations.map(l => l.name);
+  let choice = mode === "station" ? (me() || null) : null, paused = false, pendingKey = null, pendingTimer = null, boardFallback = null;
+  const pick = mode === "handover" || mode === "station";
+  const opts = mode === "handover" ? PEOPLE.filter(p => p !== me()) : PEOPLE;
+  const myOffers = () => db.offers.filter(o => o.from === me());
   $("#app").innerHTML = `${backHome}
     <h1 style="margin-top:10px">${job.title}</h1>
     ${nfcNotice()}
-    ${solo ? `
-      <button class="primary big" id="startcheck" style="margin-top:6px">Start</button>` : `
+    ${mode === "station" ? `<p class="muted" style="margin-top:-6px">Leave this open on a phone at the key board, or use it on your own phone. It stays awake and keeps listening.</p>` : ""}
+    ${mode === "handover" ? `<p class="muted" style="margin-top:-6px">They get an Accept button. The keys stay with you until they accept.</p>` : ""}
+    ${pick ? `
       <div class="step"><i>1</i>${job.ask}</div>
-      <div class="chips big">${opts.map(o => `<button data-c="${esc(o)}">${esc(o)}</button>`).join("")}
-        ${mode === "handover" ? "" : `<button id="addloc">+ Add board</button>`}</div>
-      <div class="step dim" id="s2"><i>2</i>${job.tap}</div>`}
+      <div class="chips big">${opts.map(o => `<button data-c="${esc(o)}" class="${o === choice ? "on" : ""}">${esc(o)}</button>`).join("")}</div>
+      <div class="step ${choice ? "" : "dim"}" id="s2"><i>2</i>${job.tap}</div>
+      ${mode === "station" && choice ? `<button class="primary big" id="startcheck">Start</button>` : ""}` : `
+      <button class="primary big" id="startcheck" style="margin-top:6px">Start</button>`}
+    ${mode === "in" ? `<details style="margin-top:12px"><summary class="muted">No peg stickers on this board yet?</summary>
+      <div class="muted" style="margin:8px 0">Pick the board and just tap keys. They'll show as "peg unknown".</div>
+      <div class="chips">${db.locations.map(l => `<button data-b="${esc(l.name)}">${esc(l.name)}</button>`).join("")}</div></details>` : ""}
     <div id="live"></div>
     <ul class="log" id="log"></ul>
+    ${mode === "handover" ? `<div id="waiting"></div>` : ""}
     <button class="big" id="done" style="display:none;margin-top:10px">Done</button>`;
 
   const log = (html, cls) => { $("#log").insertAdjacentHTML("afterbegin", `<li class="${cls}">${html}</li>`); buzz(cls === "good"); };
-  $("#done").onclick = () => { stopSession(); location.hash = "#/"; };
+  const ready = (extra = "") => { $("#live").innerHTML = `<div class="listen"><div class="dot"></div><div>${extra || "Ready — " + job.tap.toLowerCase()}</div></div>`; };
+  const kname = k => `${esc(vlabel(vehicle(k.vehicleId)))} key ${k.n}`;
+  const showWaiting = () => {
+    if (!$("#waiting")) return;
+    const ws = myOffers();
+    $("#waiting").innerHTML = ws.length ? `<h2>Waiting to be accepted</h2>${ws.map(o => { const k = db.keys.find(x => x.id === o.keyId);
+      return `<div class="card row"><span class="grow">${k ? kname(k) : "Key"} → <b>${esc(o.to)}</b></span><button class="danger" data-cancel="${o.id}">Cancel</button></div>`; }).join("")}` : "";
+    document.querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
+      await store.del("offers", b.dataset.cancel).catch(() => {}); db.offers = db.offers.filter(o => o.id !== b.dataset.cancel); showWaiting();
+    });
+  };
+  showWaiting();
+  $("#done").onclick = () => { stopSession(); keepAwake(false); location.hash = "#/"; };
 
   const go = async () => {
     if (!NFC) { toast("Needs Chrome on an Android phone"); return; }
@@ -641,35 +772,81 @@ function viewDo(mode) {
     catch (e) { log("Couldn't start NFC: " + esc(e.message) + " — is NFC switched on?", "bad"); return; }
     if ($("#s2")) $("#s2").classList.remove("dim");
     if ($("#startcheck")) $("#startcheck").style.display = "none";
-    $("#live").innerHTML = `<div class="listen"><div class="dot"></div><div>Ready — ${job.tap.toLowerCase()}${choice ? ` <span class="muted">(${mode === "handover" ? "to" : ""} ${esc(choice)})</span>` : ""}</div></div>`;
-    $("#done").style.display = "";
+    if (mode === "station") keepAwake(true);
+    ready(); $("#done").style.display = "";
+  };
+  const waitForPeg = k => {
+    pendingKey = k; clearTimeout(pendingTimer);
+    ready(`<b>${kname(k)}</b><br>Now tap the peg you're hanging it on`);
+    pendingTimer = setTimeout(() => { pendingKey = null; ready(); }, 45000);
+  };
+  const putOn = async (k, peg) => {
+    const l = boardById(peg.board), boardName = l ? l.name : "Board";
+    const occupant = keyOnPeg(boardName, peg.n);
+    const ev = await saveMove(k, "in", { location: boardName, peg: peg.n, person: choice || me() });
+    log("✓ " + describe(ev, kname(k)), "good");
+    if (occupant && occupant.id !== k.id) log(`Heads up: ${kname(occupant)} was also logged on that peg`, "warn");
+    pendingKey = null; clearTimeout(pendingTimer); ready();
+  };
+  const pegInfo = peg => {
+    const l = boardById(peg.board), k = l && keyOnPeg(l.name, peg.n);
+    $("#live").innerHTML = `<div class="card result"><div class="found">🗂 ${esc(pegLabel(peg))}</div>
+      <div style="margin-top:8px">${k ? `Holds <span class="plate">${esc(vehicle(k.vehicleId)?.vrm || "?")}</span> key ${k.n}` : `<span class="muted">Empty</span>`}</div></div>`;
+    buzz(true);
   };
 
   const handle = async t => {
     if (paused) return;
     if (!t) { log("Couldn't read that — try again", "bad"); return; }
-    if (!t.key) { log(mode === "unregister" ? "That sticker isn't registered to anything — it's free to use" : "That tag isn't registered to a vehicle", mode === "unregister" ? "warn" : "bad"); return; }
-    const k = t.key, v = vehicle(k.vehicleId);
-    if (mode === "unregister") { paused = true; $("#log").innerHTML = ""; unregisterCard(k, v); buzz(true); return; }
-    if (mode === "check") {
-      const hist = db.events.filter(e => e.keyId === k.id).sort((a, b) => b.at - a.at).slice(0, 3);
-      $("#log").innerHTML = "";
-      $("#live").innerHTML = `<div class="card result">
-          <div class="plate">${esc(v?.vrm || "?")}</div>
-          <div style="font-size:20px;font-weight:700;margin-top:10px">${esc(v?.name || "Unknown vehicle")}</div>
-          <div class="muted">Key ${k.n} of ${keysFor(k.vehicleId).length}</div>
-          <div style="margin:12px 0">${keyStatus(k)}</div>
-          ${hist.length ? `<div class="muted" style="font-size:14px">${hist.map(e => describe(e, "it") + " · " + when(e.at)).join("<br>")}</div>` : ""}
-          <a href="#/v/${k.vehicleId}" style="display:block;margin-top:14px"><button class="primary big">Open vehicle</button></a>
-          <div class="muted" style="margin-top:10px">Tap another key to check it</div>
-        </div>`;
-      buzz(true);
-      return;
-    }
-    const ev = { id: rid("e_"), keyId: k.id, vehicleId: k.vehicleId, action: mode,
-      location: mode === "handover" ? "" : choice, to: mode === "handover" ? choice : "", person: me() || "Someone", at: Date.now() };
-    try { await store.put("events", ev); db.events.push(ev); stampPos(k, mode === "in" ? "board" : "held"); ensureTracking(); log("✓ " + describe(ev, `${esc(vlabel(v))} key ${k.n}`), "good"); }
-    catch (err) { log("Couldn't save: " + esc(err.message), "bad"); }
+    try {
+      if (mode === "unregister") {
+        if (t.key) { paused = true; $("#log").innerHTML = ""; unregisterCard(t.key, vehicle(t.key.vehicleId)); buzz(true); return; }
+        if (t.peg) { paused = true; $("#log").innerHTML = ""; unregisterPegCard(t.peg); buzz(true); return; }
+        log("That sticker isn't registered to anything — it's free to use", "warn"); return;
+      }
+      if (mode === "check") {
+        if (t.peg) { pegInfo(t.peg); return; }
+        if (!t.key) { log("That sticker isn't registered", "bad"); return; }
+        const k = t.key, v = vehicle(k.vehicleId);
+        const hist = db.events.filter(e => e.keyId === k.id).sort((a, b) => b.at - a.at).slice(0, 3);
+        $("#log").innerHTML = "";
+        $("#live").innerHTML = `<div class="card result">
+            <div class="plate">${esc(v?.vrm || "?")}</div>
+            <div style="font-size:20px;font-weight:700;margin-top:10px">${esc(v?.name || "Unknown vehicle")}</div>
+            <div class="muted">Key ${k.n} of ${keysFor(k.vehicleId).length}</div>
+            <div style="margin:12px 0">${keyStatus(k)}</div>
+            ${hist.length ? `<div class="muted" style="font-size:14px">${hist.map(e => describe(e, "it") + " · " + when(e.at)).join("<br>")}</div>` : ""}
+            <a href="#/v/${k.vehicleId}" style="display:block;margin-top:14px"><button class="primary big">Open vehicle</button></a>
+            <div class="muted" style="margin-top:10px">Tap another key or peg to check it</div>
+          </div>`;
+        buzz(true); return;
+      }
+      if (t.peg) {
+        if ((mode === "in" || mode === "station") && pendingKey) { await putOn(pendingKey, t.peg); return; }
+        if (mode === "in") { log("Tap the key first, then the peg", "warn"); return; }
+        pegInfo(t.peg); return;
+      }
+      if (!t.key) { log("That sticker isn't registered to a vehicle", "bad"); return; }
+      const k = t.key, who = keyHolder(k), place = keyPlace(k);
+
+      if (mode === "handover") {
+        if (who !== me()) {
+          log(place ? `${kname(k)} is on ${esc(place.board)}${place.peg ? " · peg " + place.peg : ""} — take it from the board first`
+                    : who ? `${kname(k)} is with ${esc(who)}, not you — only they can hand it over` : `${kname(k)} hasn't been booked out to you`, "bad");
+          return;
+        }
+        const o = { id: "o_" + k.id, keyId: k.id, from: me(), to: choice, at: Date.now() };   // one offer per key; a new one replaces the old
+        await store.put("offers", o); db.offers = db.offers.filter(x => x.id !== o.id).concat(o);
+        log(`Sent — waiting for <b>${esc(choice)}</b> to accept ${kname(k)}`, "good"); showWaiting(); return;
+      }
+      if (mode === "out" || (mode === "station" && place)) {
+        if (!place) { log(`${kname(k)} isn't on a board${who ? ` — it's with ${esc(who)}` : ""}`, "bad"); return; }
+        const ev = await saveMove(k, "out", { person: choice || me() }); log("✓ " + describe(ev, kname(k)), "good"); return;
+      }
+      if (mode === "in" && boardFallback) { const ev = await saveMove(k, "in", { location: boardFallback }); log("✓ " + describe(ev, kname(k)) + " (peg unknown)", "good"); return; }
+      if (pendingKey && pendingKey.id === k.id) { pendingKey = null; clearTimeout(pendingTimer); ready(); log("Cancelled", "warn"); return; }
+      waitForPeg(k); buzz(true);
+    } catch (err) { log("Couldn't save: " + esc(err.message), "bad"); }
   };
 
   document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => {
@@ -677,9 +854,32 @@ function viewDo(mode) {
     document.querySelectorAll("[data-c]").forEach(x => x.classList.toggle("on", x === b));
     go();
   });
+  document.querySelectorAll("[data-b]").forEach(b => b.onclick = () => {
+    boardFallback = b.dataset.b;
+    document.querySelectorAll("[data-b]").forEach(x => x.classList.toggle("on", x === b));
+    go();
+  });
   if ($("#startcheck")) $("#startcheck").onclick = go;
 
-  /* unregister: confirm, release from the vehicle, optionally wipe the sticker */
+  /* unregister: confirm, release, optionally wipe the sticker */
+  const offerWipe = html => {
+    $("#live").innerHTML = `<div class="card result">${html}
+        <button class="big" id="wipe">Also wipe the sticker</button>
+        <div class="muted" style="font-size:13px;margin-top:6px">Optional — tapping it will then do nothing until it's registered again.</div>
+        <button class="primary big" id="another" style="margin-top:14px">Unregister another</button></div>`;
+    $("#another").onclick = () => { paused = false; go(); };
+    $("#wipe").onclick = async () => {
+      stopSession();
+      const ctrl = new AbortController(); session = ctrl;
+      $("#wipe").outerHTML = `<div class="listen" id="wiping"><div class="dot"></div><div>Hold the sticker to your phone now…</div></div>`;
+      try {
+        await new NDEFReader().write({ records: [{ recordType: "empty" }] }, { signal: ctrl.signal });
+        $("#wiping").outerHTML = `<div class="pill in" style="font-size:15px">✓ Sticker wiped</div>`; buzz(true);
+      } catch (err) {
+        if ($("#wiping")) $("#wiping").outerHTML = `<div class="pill out" style="font-size:15px">Couldn't wipe it — it's still unregistered, which is enough</div>`;
+      } finally { if (session === ctrl) session = null; }
+    };
+  };
   function unregisterCard(k, v) {
     $("#live").innerHTML = `<div class="card result">
         <div class="plate">${esc(v?.vrm || "?")}</div>
@@ -688,42 +888,106 @@ function viewDo(mode) {
         <button class="primary big" id="unreg" style="background:var(--bad)">Unregister this sticker</button>
         <button class="big" id="unregno" style="margin-top:8px">Cancel</button>
       </div>`;
-    $("#unregno").onclick = () => { paused = false; $("#live").innerHTML = `<div class="listen"><div class="dot"></div><div>Ready — ${job.tap.toLowerCase()}</div></div>`; };
+    $("#unregno").onclick = () => { paused = false; ready(); };
     $("#unreg").onclick = async () => {
       try {
         await store.del("keys", k.id); db.keys = db.keys.filter(x => x.id !== k.id);
         try { await store.del("pos", "pos_" + k.id); db.pos = db.pos.filter(x => x.id !== "pos_" + k.id); } catch {}
+        try { await store.del("offers", "o_" + k.id); db.offers = db.offers.filter(x => x.id !== "o_" + k.id); } catch {}
       } catch (err) { toast("Couldn't unregister: " + err.message); return; }
       ensureTracking();
-      $("#live").innerHTML = `<div class="card result">
-          <div style="font-size:20px;font-weight:700">✓ Unregistered</div>
-          <div class="muted" style="margin:6px 0 14px">${esc(v?.vrm || "")} key ${k.n} is no longer linked. The sticker can be registered to any vehicle.</div>
-          <button class="big" id="wipe">Also wipe the sticker</button>
-          <div class="muted" style="font-size:13px;margin-top:6px">Optional — tapping it will then do nothing until it's registered again.</div>
-          <button class="primary big" id="another" style="margin-top:14px">Unregister another</button>
-        </div>`;
-      $("#another").onclick = () => { paused = false; go(); };
-      $("#wipe").onclick = async () => {
-        stopSession();
-        const ctrl = new AbortController(); session = ctrl;
-        $("#wipe").outerHTML = `<div class="listen" id="wiping"><div class="dot"></div><div>Hold the sticker to your phone now…</div></div>`;
-        try {
-          await new NDEFReader().write({ records: [{ recordType: "empty" }] }, { signal: ctrl.signal });
-          $("#wiping").outerHTML = `<div class="pill in" style="font-size:15px">✓ Sticker wiped</div>`; buzz(true);
-        } catch (err) {
-          if ($("#wiping")) $("#wiping").outerHTML = `<div class="pill out" style="font-size:15px">Couldn't wipe it — it's still unregistered, which is enough</div>`;
-        } finally { if (session === ctrl) session = null; }
-      };
+      offerWipe(`<div style="font-size:20px;font-weight:700">✓ Unregistered</div>
+        <div class="muted" style="margin:6px 0 14px">${esc(v?.vrm || "")} key ${k.n} is no longer linked. The sticker can be registered to any vehicle.</div>`);
     };
   }
-  if ($("#addloc")) $("#addloc").onclick = async () => {
-    const n = (prompt("New board name, e.g. Key board 4") || "").trim(); if (!n) return;
-    const l = { id: rid("l_"), name: n, order: db.locations.length }; await store.put("locations", l); db.locations.push(l); viewDo(mode);
+  function unregisterPegCard(peg) {
+    $("#live").innerHTML = `<div class="card result">
+        <div class="found">🗂 ${esc(pegLabel(peg))}</div>
+        <button class="primary big" id="unreg" style="background:var(--bad);margin-top:12px">Unregister this peg sticker</button>
+        <button class="big" id="unregno" style="margin-top:8px">Cancel</button>
+      </div>`;
+    $("#unregno").onclick = () => { paused = false; ready(); };
+    $("#unreg").onclick = async () => {
+      try { await store.del("pegs", peg.id); db.pegs = db.pegs.filter(x => x.id !== peg.id); }
+      catch (err) { toast("Couldn't unregister: " + err.message); return; }
+      offerWipe(`<div style="font-size:20px;font-weight:700">✓ Peg sticker unregistered</div>
+        <div class="muted" style="margin:6px 0 14px">${esc(pegLabel(peg))} no longer has a sticker. You can set it up again from the board.</div>`);
+    };
+  }
+}
+
+/* ---------- set up a board's peg stickers ---------- */
+function viewPegSetup(lid) {
+  const l = boardById(lid);
+  if (!l) { location.hash = "#/keys"; return; }
+  setNav("keys");
+  const mine = () => db.pegs.filter(p => p.board === lid);
+  const nextN = () => { const used = new Set(mine().map(p => p.n)); let n = 1; while (used.has(n)) n++; return n; };
+  $("#app").innerHTML = `<a href="#/keys" class="muted" style="text-decoration:none">← Where are the keys</a>
+    <h1 style="margin-top:10px">Set up pegs · ${esc(l.name)}</h1>
+    ${nfcNotice()}
+    <div class="card">
+      <div class="row"><label class="grow">Pegs on this board</label><input id="pc" type="number" min="1" max="2000" value="${pegCount(l)}" style="width:100px"></div>
+      <div class="row" style="margin-top:8px"><label class="grow">Pegs across (per row)</label><input id="cols" type="number" min="1" max="40" value="${pegCols(l)}" style="width:100px"></div>
+      <div class="row" style="margin-top:8px"><label class="grow">Board name</label><input id="bn" value="${esc(l.name)}" style="width:160px"></div>
+      <button class="big" id="savelayout" style="margin-top:10px">Save layout</button>
+    </div>
+    <div class="card"><b>${mine().length}</b> of ${pegCount(l)} pegs have a sticker.</div>
+    <div class="step"><i>1</i>Start numbering at</div>
+    <div class="row"><input id="startn" type="number" min="1" value="${nextN()}" style="width:110px;font-size:20px;font-weight:700"><button class="primary grow big" id="go">Start tapping pegs</button></div>
+    <div class="step dim" id="s2"><i>2</i>Tap the peg stickers in order — peg <span id="cur">${nextN()}</span> next</div>
+    <ul class="log" id="log"></ul>`;
+  const log = (msg, cls) => { $("#log").insertAdjacentHTML("afterbegin", `<li class="${cls}">${esc(msg)}</li>`); buzz(cls === "good"); };
+  $("#savelayout").onclick = async () => {
+    l.pegCount = Math.max(1, +$("#pc").value || 50); l.cols = Math.max(1, +$("#cols").value || 10);
+    l.name = $("#bn").value.trim() || l.name;
+    try { await store.put("locations", l); toast("Saved"); } catch (e) { toast("Couldn't save: " + e.message); return; }
+    viewPegSetup(lid);
+  };
+  $("#go").onclick = async () => {
+    if (!NFC) { toast("Needs Chrome on an Android phone"); return; }
+    let n = Math.max(1, +$("#startn").value || 1), busy = false;
+    const recent = new Map();
+    stopSession();
+    const ctrl = new AbortController(); session = ctrl;
+    const reader = new NDEFReader();
+    try { await reader.scan({ signal: ctrl.signal }); } catch (e) { log("Couldn't start NFC: " + e.message, "bad"); return; }
+    $("#s2").classList.remove("dim"); $("#go").textContent = "Listening…"; $("#go").disabled = true;
+    keepAwake(true);
+    reader.onreading = async e => {
+      const t = readTag(e), tk = t.serial || t.url;
+      if (busy || (tk && Date.now() - (recent.get(tk) || 0) < 3000)) return;
+      busy = true; recent.set(tk, Date.now());
+      try {
+        if (t.key) { log(`That's a key sticker (${vlabel(vehicle(t.key.vehicleId))} key ${t.key.n}) — skipped`, "bad"); return; }
+        if (t.peg) { log(`Already ${pegLabel(t.peg)} — skipped`, "warn"); return; }
+        while (mine().some(p => p.n === n)) n++;
+        const peg = { id: rid("p_"), serial: t.serial, board: lid, n, at: Date.now() };
+        await reader.write({ records: [{ recordType: "url", data: pegUrl(peg.id) }] }, { signal: ctrl.signal });
+        await store.put("pegs", peg); db.pegs.push(peg);
+        if (n > pegCount(l)) { l.pegCount = n; store.put("locations", l).catch(() => {}); }
+        log(`Peg ${n} registered`, "good");
+        n++; $("#cur").textContent = n;
+      } catch (err) { if (err.name !== "AbortError") log("Didn't register — hold it still and try again", "bad"); recent.delete(tk); }
+      finally { setTimeout(() => busy = false, 700); }
+    };
   };
 }
 
+/* ---------- tapping a peg sticker opens this ---------- */
+function viewPeg(id) {
+  setNav("keys");
+  const peg = db.pegs.find(p => p.id === id);
+  if (!peg) { $("#app").innerHTML = `<div class="empty">This peg sticker isn't registered any more.<br><br><a href="#/keys">Where are the keys</a></div>`; return; }
+  const l = boardById(peg.board), k = l && keyOnPeg(l.name, peg.n), v = k && vehicle(k.vehicleId);
+  $("#app").innerHTML = `<a href="#/keys" class="muted" style="text-decoration:none">← Where are the keys</a>
+    <div class="card result" style="margin-top:12px"><div class="found" style="font-size:22px">🗂 ${esc(pegLabel(peg))}</div>
+      <div style="margin-top:12px">${k ? `<span class="plate" style="font-size:22px">${esc(v?.vrm || "?")}</span><div style="margin-top:6px">${esc(v?.name || "")} · key ${k.n}</div>
+        <a href="#/v/${k.vehicleId}" style="display:block;margin-top:12px"><button class="primary big">Open vehicle</button></a>` : `<span class="muted">Nothing on this peg</span>`}</div></div>`;
+}
+
 /* ---------- map: where each person / board's keys are ---------- */
-let map = null, mapLayer = null, mapFitted = false, leafletLoading = null;
+let map = null, mapLayer = null, mapFitted = false, leafletLoading = null, mapQuery = "";
 function loadLeaflet() {
   if (window.L) return Promise.resolve();
   if (leafletLoading) return leafletLoading;
@@ -735,7 +999,7 @@ function loadLeaflet() {
 }
 function mapGroups() {
   const groups = new Map();
-  for (const k of db.keys) {
+  for (const k of (normReg(mapQuery) ? matchingKeys(mapQuery) : db.keys)) {
     const e = lastEvent(k.id), p = posFor(k.id);
     if (!e || !p) continue;
     const onBoard = e.action === "in";
@@ -768,7 +1032,10 @@ const w3wLink = a => `<a href="https://what3words.com/${esc(a.words)}" target="_
 const ago = t => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : when(t); };
 async function viewMap() {
   setNav("map");
-  $("#app").innerHTML = `<h1>Map</h1><div id="map"></div><div id="maplist"></div>`;
+  $("#app").innerHTML = `<h1>Map</h1>
+    <input id="mq" placeholder="🔍 Find a reg on the map" value="${esc(mapQuery)}" autocomplete="off" style="font-size:18px;text-transform:uppercase;margin-bottom:10px">
+    <div id="map"></div><div id="maplist"></div>`;
+  $("#mq").oninput = () => { mapQuery = $("#mq").value; mapFitted = false; updateMap(); };
   map = null; mapFitted = false;
   try { await loadLeaflet(); } catch { $("#map").outerHTML = `<div class="notice">Couldn't load the map.</div>`; return; }
   if (currentView !== "map" || !$("#map")) return;
@@ -796,7 +1063,7 @@ function updateMap() {
       .bindPopup(`<b>${esc(g.name)}</b><br>${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join("<br>")}${g.w3w && g.w3w.words ? "<br>" + w3wLink(g.w3w) : ""}<br><span style="color:#888">${g.onBoard ? "Put on board" : "Updated"} ${ago(g.pos.at)}</span>`)
       .addTo(mapLayer);
   }
-  if (!mapFitted && pts.length) { map.fitBounds(pts, { padding: [40, 40], maxZoom: 17 }); mapFitted = true; }
+  if (!mapFitted && pts.length) { map.fitBounds(pts, { padding: [40, 40], maxZoom: normReg(mapQuery) ? 19 : 17 }); mapFitted = true; }
   $("#maplist").innerHTML = groups.length ? groups.sort((a, b) => a.onBoard - b.onBoard || a.name.localeCompare(b.name)).map(g => `
     <div class="card" data-g="${esc(g.pos.lat + "," + g.pos.lng)}" style="cursor:pointer">
       <div class="row"><b class="grow">${g.onBoard ? "🗂" : "👤"} ${esc(g.name)}</b>
@@ -804,7 +1071,8 @@ function updateMap() {
       ${g.w3w && g.w3w.words ? `<div style="margin-top:6px;font-size:17px">${w3wLink(g.w3w)}${g.w3w.near ? ` <span class="muted">near ${esc(g.w3w.near)}</span>` : ""}${g.pos.acc ? ` <span class="muted">· ±${g.pos.acc} m</span>` : ""}</div>`
         : g.w3w && g.w3w.error ? `<div class="muted" style="margin-top:6px">what3words: ${esc(g.w3w.error)}</div>` : ""}
       <div class="muted" style="margin-top:4px">${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join(" · ")}</div>
-    </div>`).join("") : `<div class="empty">No key locations yet. They appear once someone books in, takes or hands over keys with location allowed.</div>`;
+    </div>`).join("") : normReg(mapQuery) ? `<div class="empty">No map location for "${esc(mapQuery)}"${matchingKeys(mapQuery).length ? `<br>${matchingKeys(mapQuery).map(k => `${esc(vehicle(k.vehicleId)?.vrm || "")} key ${k.n}: ${esc(whereText(k))}`).join("<br>")}` : ""}</div>`
+    : `<div class="empty">No key locations yet. They appear once someone books in, takes or hands over keys with location allowed.</div>`;
   document.querySelectorAll("[data-g]").forEach(c => c.onclick = ev => { if (ev.target.closest("a")) return; const [a, b] = c.dataset.g.split(",").map(Number); map.setView([a, b], 19); window.scrollTo(0, 0); });
 }
 setInterval(() => { if (currentView === "map") updateMap(); }, 5000);   // keep "x s ago" fresh
@@ -818,6 +1086,8 @@ function render() {
   if (currentView === "map") viewMap();
   else if (m) viewVehicle(m[1]);
   else if (h.startsWith("#/do/")) viewDo(h.slice(5));
+  else if (h.startsWith("#/pegs/")) viewPegSetup(h.slice(7));
+  else if (h.startsWith("#/peg/")) viewPeg(h.slice(6));
   else if (h.startsWith("#/book")) viewBook();
   else if (h.startsWith("#/keys") || h.startsWith("#/boards")) viewKeys();
   else if (h.startsWith("#/vehicles")) viewVehicles();
@@ -840,6 +1110,7 @@ async function start() {
   $("#app").innerHTML = `<div class="empty">Loading…</div>`;
   try { await load(); } catch (e) { $("#app").innerHTML = `<div class="notice">Couldn't load data: ${esc(e.message)}</div>`; return; }
   ready = true;
+  renderOffers();
   goLive();
   ensureTracking();
   route();
