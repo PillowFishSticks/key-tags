@@ -305,14 +305,29 @@ function ensureTracking() {
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
   }
   if (!held.length && watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  keepAwake(held.length > 0);
   if (!pingTimer) pingTimer = setInterval(ping, 10000);
   renderTracking();
 }
+/* keep the screen on while holding keys, so the page keeps pinging */
+let wakeLock = null, wantAwake = false;
+async function keepAwake(on) {
+  wantAwake = on;
+  try {
+    if (on && !wakeLock && "wakeLock" in navigator && document.visibilityState === "visible") {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; renderTracking(); });
+    } else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch {}
+  renderTracking();
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && wantAwake) keepAwake(true); });
+
 function renderTracking() {
   const el = $("#track"), n = myHeldKeys().length;
   el.classList.toggle("on", n > 0);
   el.textContent = !n ? "" : trackErr ? "📍 " + trackErr
-    : `📍 Sharing your location for ${n} key${n === 1 ? "" : "s"} — keep this app open`;
+    : `📍 Sharing your location for ${n} key${n === 1 ? "" : "s"} — ${wakeLock ? "screen kept on, leave this app open" : "keep this app open"}`;
 }
 async function ping() {
   const held = myHeldKeys();
