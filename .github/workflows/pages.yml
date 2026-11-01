@@ -13,7 +13,7 @@ permissions:
 
 # one publish at a time; a newer push replaces a queued one
 concurrency:
-  group: pages
+  group: pages-publish
   cancel-in-progress: false
 
 jobs:
