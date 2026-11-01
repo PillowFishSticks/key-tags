@@ -109,6 +109,7 @@ a.vlink{color:inherit;text-decoration:none}
 <header>
   <div class="bar">
     <div class="brand">🔑 Key Tags</div>
+    <button class="who" id="unregbtn">🧹 Unregister</button>
     <button class="who" id="who"></button>
   </div>
   <nav>
@@ -319,10 +320,17 @@ async function startIdle(force) {
 
 /* ---------- views ---------- */
 function setNav(name) { document.querySelectorAll("[data-nav]").forEach(a => a.classList.toggle("on", a.dataset.nav === name)); }
+let unregMode = false;
+$("#unregbtn").onclick = () => {
+  unregMode = true;
+  if (location.hash === "" || location.hash === "#/") { stopSession(); viewActions(); startIdle(); window.scrollTo(0, 0); }
+  else location.hash = "#/";
+};
 function renderWho() {
   const w = $("#who");
   w.textContent = me() ? `👤 ${me()}` : "Set your name";
   w.style.display = (sb && !signedInName) ? "none" : "";
+  $("#unregbtn").style.display = w.style.display;
 }
 $("#who").onclick = async () => {
   if (sb) {
@@ -771,6 +779,15 @@ function viewActions() {
       return `<a class="vlink card row" href="#/v/${k.vehicleId}/k/${k.id}"><span class="plate">${esc(v?.vrm || "?")}</span><span class="grow">${esc(v?.name || "")}</span><span class="muted">Key ${k.n}</span></a>`; }).join("")}` : ""}`;
 
   const scanbox = async () => {
+    if (unregMode) {
+      $("#scanbox").innerHTML = `<div class="listen" style="font-size:18px;border-color:var(--bad)"><div class="dot" style="background:var(--bad)"></div>
+        <div class="grow">${NFC ? "Tap the sticker you want to unregister" : "Unregistering needs Chrome on an Android phone"}</div>
+        <button class="danger" id="unregcancel" style="color:var(--muted)">Cancel</button></div>`;
+      $("#unregcancel").onclick = () => { unregMode = false; viewActions(); };
+      if (NFC && !idleCtrl) $("#scanbox").insertAdjacentHTML("beforeend", `<button class="primary big" id="scanon" style="margin-top:8px">📡 Tap to start scanning</button>`);
+      if ($("#scanon")) $("#scanon").onclick = async () => { await startIdle(true); scanbox(); };
+      return;
+    }
     if (!NFC) { $("#scanbox").innerHTML = ""; return; }
     const on = !!idleCtrl;
     $("#scanbox").innerHTML = on
@@ -818,6 +835,7 @@ function viewActions() {
     };
   };
   tapHandler = t => {
+    if (unregMode) { unregTap(t); return; }
     if (t.key) showKey(t.key);
     else if (t.peg) showPeg(t.peg);
     else { $("#tapped").innerHTML = `<div class="card muted">That sticker isn't registered. Use <b>Book in a vehicle</b> to register key stickers, or <b>Keys → Set up pegs</b> for peg stickers.</div>`; }
@@ -834,6 +852,29 @@ function viewActions() {
   $("#hq").oninput = showResults;
 }
 let showKeyExternal = () => {}, homeShown = null, doneTimer = null;
+/* unregister mode (from the header button): tap a sticker, confirm, done */
+function unregTap(t) {
+  const el = $("#tapped"); if (!el) return;
+  const label = t.key ? `<span class="plate" style="font-size:20px">${esc(vehicle(t.key.vehicleId)?.vrm || "?")}</span> key ${t.key.n}`
+              : t.peg ? `🗂 ${esc(pegLabel(t.peg))}` : null;
+  if (!label) { el.innerHTML = `<div class="card muted">That sticker isn't registered — it's already free to use.</div>`; return; }
+  el.innerHTML = `<div class="card" style="border:2px solid var(--bad)">
+      <div style="font-size:18px;font-weight:700">Unregister ${label}?</div>
+      <div class="row" style="margin-top:12px;gap:8px"><button class="grow" id="uy" style="background:var(--bad);color:#fff">Yes, unregister</button><button id="un">Cancel</button></div></div>`;
+  $("#un").onclick = () => { el.innerHTML = ""; };
+  $("#uy").onclick = async () => {
+    try {
+      if (t.key) {
+        const k = t.key;
+        await store.del("keys", k.id); db.keys = db.keys.filter(x => x.id !== k.id);
+        await store.del("pos", "pos_" + k.id).catch(() => {}); db.pos = db.pos.filter(x => x.id !== "pos_" + k.id);
+        await store.del("offers", "o_" + k.id).catch(() => {}); db.offers = db.offers.filter(x => x.id !== "o_" + k.id);
+        ensureTracking();
+      } else { await store.del("pegs", t.peg.id); db.pegs = db.pegs.filter(x => x.id !== t.peg.id); }
+    } catch (err) { toast("Couldn't unregister: " + err.message); return; }
+    unregMode = false; viewActions(); showDone("Sticker unregistered — it can be used again");
+  };
+}
 function showDone(msg) {
   const el = $("#tapped"); if (!el) return;
   el.innerHTML = `<div class="card" style="border:2px solid var(--good);background:var(--good-bg);color:var(--good);font-weight:700;font-size:17px">✓ ${esc(msg)}</div>`;
@@ -1247,6 +1288,7 @@ function render() {
 }
 const ownsNfc = h => /^#\/pegs\//.test(h) || h.startsWith("#/book");   // these pages run their own scanning
 function route() {
+  if (!(location.hash === "" || location.hash === "#/")) unregMode = false;
   pegWaiter = null; tapHandler = null; homeShown = null;
   stopSession(); if (!ready) return; render(); window.scrollTo(0, 0);
   if (!ownsNfc(location.hash)) startIdle();
