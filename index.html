@@ -133,7 +133,7 @@ async function load() {
   const [vehicles, keys, events, locations] = await Promise.all(["vehicles", "keys", "events", "locations"].map(k => store.all(k)));
   db = { vehicles, keys, events, locations };
   if (!db.locations.length) {
-    for (const [i, n] of ["Locker 1", "Locker 2", "Locker 3", "Locker 4"].entries()) {
+    for (const [i, n] of ["Key board 1", "Key board 2", "Key board 3"].entries()) {
       const l = { id: "l_" + i, name: n, order: i }; db.locations.push(l); await store.put("locations", l);
     }
   }
@@ -142,7 +142,10 @@ async function load() {
 }
 
 /* ---------- helpers ---------- */
-const me = () => localStorage[LS + "me"] || "";
+let signedInName = "";
+const me = () => signedInName || localStorage[LS + "me"] || "";
+const PEOPLE = ["Mark", "Chris", "Peter"];
+const emailFor = name => name.toLowerCase() + "@keytags.app";
 const vehicle = id => db.vehicles.find(v => v.id === id);
 const vlabel = v => v ? `${v.name} (${v.vrm})` : "Unknown vehicle";
 const keysFor = vid => db.keys.filter(k => k.vehicleId === vid).sort((a, b) => a.n - b.n);
@@ -155,9 +158,15 @@ function buzz(ok) { try { navigator.vibrate && navigator.vibrate(ok ? 80 : [60, 
 function keyStatus(k) {
   const e = lastEvent(k.id);
   if (!e) return `<span class="pill new">Not scanned yet</span>`;
+  if (e.action === "handover") return `<span class="pill out">With ${esc(e.to)}</span>`;
   return e.action === "out"
-    ? `<span class="pill out">Out with ${esc(e.person)}</span>`
+    ? `<span class="pill out">With ${esc(e.person)}</span>`
     : `<span class="pill in">In ${esc(e.location)}</span>`;
+}
+
+function describe(e, what) {
+  if (e.action === "handover") return `<b>${esc(e.person)}</b> handed ${what} to <b>${esc(e.to)}</b>`;
+  return `<b>${esc(e.person)}</b> ${e.action === "out" ? "took" : "put"} ${what} ${e.action === "out" ? "from" : "into"} ${esc(e.location)}`;
 }
 
 /* read a tag: its serial + the key id written in its URL (if any) */
@@ -178,8 +187,65 @@ function stopSession() { if (session) { session.abort(); session = null; } }
 
 /* ---------- views ---------- */
 function setNav(name) { document.querySelectorAll("[data-nav]").forEach(a => a.classList.toggle("on", a.dataset.nav === name)); }
-function renderWho() { $("#who").textContent = me() ? `👤 ${me()}` : "Set your name"; }
-$("#who").onclick = () => { const n = prompt("Your name (shown when you scan keys in/out):", me()); if (n !== null) { localStorage[LS + "me"] = n.trim(); renderWho(); } };
+function renderWho() {
+  const w = $("#who");
+  w.textContent = me() ? `👤 ${me()}` : "Set your name";
+  w.style.display = (sb && !signedInName) ? "none" : "";
+}
+$("#who").onclick = async () => {
+  if (sb) {
+    if (signedInName && confirm(`Signed in as ${signedInName}. Sign out?`)) { stopSession(); await sb.auth.signOut(); location.reload(); }
+    return;
+  }
+  const n = prompt("Your name (shown when you scan keys in/out):", me()); if (n !== null) { localStorage[LS + "me"] = n.trim(); renderWho(); }
+};
+
+/* ---------- sign in (shared mode) ---------- */
+function viewLogin(msg) {
+  setNav("");
+  document.querySelector("nav").style.display = "none";
+  let pick = localStorage[LS + "lastUser"] || PEOPLE[0];
+  $("#app").innerHTML = `
+    <h1>Sign in</h1>
+    <form class="card" id="login">
+      <h2 style="margin-top:0">Who are you?</h2>
+      <div class="seg" id="people">${PEOPLE.map(p => `<button type="button" data-p="${p}" class="${p === pick ? "on" : ""}">${p}</button>`).join("")}</div>
+      <h2>Password</h2>
+      <input id="pw" type="password" autocomplete="current-password" required>
+      <button class="primary big" style="margin-top:16px" id="go">Sign in</button>
+      ${msg ? `<div class="notice" style="margin:12px 0 0">${esc(msg)}</div>` : ""}
+    </form>`;
+  document.querySelectorAll("[data-p]").forEach(b => b.onclick = () => {
+    pick = b.dataset.p; document.querySelectorAll("[data-p]").forEach(x => x.classList.toggle("on", x === b));
+  });
+  $("#login").onsubmit = async ev => {
+    ev.preventDefault();
+    $("#go").disabled = true; $("#go").textContent = "Signing in…";
+    const { error } = await sb.auth.signInWithPassword({ email: emailFor(pick), password: $("#pw").value });
+    if (error) { viewLogin("Wrong password — try again."); return; }
+    localStorage[LS + "lastUser"] = pick;
+    start();
+  };
+}
+
+/* ---------- live updates ---------- */
+let liveTimer = null, liveChannel = null;
+function goLive() {
+  if (!sb || liveChannel) return;
+  liveChannel = sb.channel("items-live")
+    .on("postgres_changes", { event: "*", schema: "public", table: "items" }, () => {
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(refresh, 400);
+    })
+    .subscribe();
+}
+async function refresh() {
+  try { await load(); } catch { return; }
+  // don't redraw mid-scan or while someone is typing; the data is still updated underneath
+  const typing = document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName);
+  if (session || typing || document.querySelector("#reg .panel")) return;
+  const y = window.scrollY; render(); window.scrollTo(0, y);
+}
 
 function nfcNotice() {
   return NFC ? "" : `<div class="notice">Scanning needs <b>Chrome on an Android phone</b>. On this device you can still view vehicles, and tapping a registered tag opens its page.</div>`;
@@ -243,7 +309,7 @@ function viewVehicle(vid) {
     <h2>History</h2>
     <div class="card hist">${hist.length ? `<ul>${hist.map(e => {
       const k = db.keys.find(x => x.id === e.keyId);
-      return `<li><b>${esc(e.person)}</b> ${e.action === "out" ? "took out" : "returned"} key ${k ? k.n : "?"} ${e.action === "out" ? "from" : "to"} ${esc(e.location)}<br><span class="muted">${when(e.at)}</span></li>`;
+      return `<li>${describe(e, "key " + (k ? k.n : "?"))}<br><span class="muted">${when(e.at)}</span></li>`;
     }).join("")}</ul>` : `<span class="muted">Nothing yet.</span>`}</div>
     <button class="danger" id="delv" style="margin-top:24px">Delete vehicle</button>`;
   if (NFC) $("#regbtn").onclick = () => registerPanel($("#reg"), v);
@@ -327,7 +393,7 @@ async function runRegister(host, v, count) {
 }
 
 /* ---------- scan in / out ---------- */
-let scanMode = "out", scanLoc = null;
+let scanMode = "out", scanLoc = null, handTo = null;
 function viewScan() {
   setNav("scan");
   stopSession();
@@ -338,21 +404,27 @@ function viewScan() {
     <div class="seg" id="mode">
       <button data-m="out" class="${scanMode === "out" ? "on" : ""}">Taking out</button>
       <button data-m="in" class="${scanMode === "in" ? "on" : ""}">Putting back</button>
+      <button data-m="handover" class="${scanMode === "handover" ? "on" : ""}">Hand over</button>
     </div>
+    ${scanMode === "handover" ? `
+    <h2>Hand to</h2>
+    <div class="chips">${PEOPLE.filter(p => p !== me()).map(p => `<button data-to="${p}" class="${p === handTo ? "on" : ""}">${p}</button>`).join("")}</div>` : `
     <h2 id="loclabel">${scanMode === "out" ? "From" : "Into"}</h2>
     <div class="chips" id="locs">${db.locations.map(l => `<button data-l="${esc(l.name)}" class="${l.name === scanLoc ? "on" : ""}">${esc(l.name)}</button>`).join("")}
-      <button id="addloc">+ Add</button></div>
+      <button id="addloc">+ Add</button></div>`}
     <h2>Who</h2>
-    <input id="me" placeholder="Your name" value="${esc(me())}">
+    ${sb ? `<div class="card" style="margin:0">Scanning as <b>${esc(me())}</b></div><input id="me" type="hidden" value="${esc(me())}">`
+         : `<input id="me" placeholder="Your name" value="${esc(me())}">`}
     <div style="margin-top:18px">${NFC ? `<button class="primary big" id="scan">Start scanning</button>` : ""}</div>
     <div id="scanpanel"></div>`;
   document.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { scanMode = b.dataset.m; viewScan(); });
   document.querySelectorAll("[data-l]").forEach(b => b.onclick = () => { scanLoc = b.dataset.l; viewScan(); });
-  $("#addloc").onclick = async () => {
+  document.querySelectorAll("[data-to]").forEach(b => b.onclick = () => { handTo = b.dataset.to; viewScan(); });
+  if ($("#addloc")) $("#addloc").onclick = async () => {
     const n = (prompt("New location name, e.g. Key place 5") || "").trim(); if (!n) return;
     const l = { id: rid("l_"), name: n, order: db.locations.length }; await store.put("locations", l); db.locations.push(l); scanLoc = n; viewScan();
   };
-  $("#me").onchange = () => { localStorage[LS + "me"] = $("#me").value.trim(); renderWho(); };
+  if ($("#me").type !== "hidden") $("#me").onchange = () => { localStorage[LS + "me"] = $("#me").value.trim(); renderWho(); };
   if (NFC) $("#scan").onclick = runScan;
 }
 
@@ -360,12 +432,14 @@ async function runScan() {
   const person = $("#me").value.trim();
   if (!person) { toast("Add your name first"); $("#me").focus(); return; }
   localStorage[LS + "me"] = person; renderWho();
-  if (!scanLoc) { toast("Pick a location"); return; }
-  const mode = scanMode, loc = scanLoc;
+  const mode = scanMode;
+  if (mode === "handover" && (!handTo || handTo === person)) { toast("Pick who you're handing to"); return; }
+  if (mode !== "handover" && !scanLoc) { toast("Pick a location"); return; }
+  const loc = mode === "handover" ? "" : scanLoc, to = mode === "handover" ? handTo : "";
   const recent = new Map();
   $("#scan").style.display = "none";
   $("#scanpanel").innerHTML = `<div class="panel">
-    <div class="row"><div class="grow"><b>${mode === "out" ? "Taking out from" : "Putting back into"} ${esc(loc)}</b><br><span class="muted">Tap key tags one after another</span></div>
+    <div class="row"><div class="grow"><b>${mode === "handover" ? "Handing to " + esc(to) : (mode === "out" ? "Taking out from " : "Putting back into ") + esc(loc)}</b><br><span class="muted">Tap key tags one after another</span></div>
     <button id="stopscan">Stop</button></div><ul class="log" id="log"></ul></div>`;
   const log = (msg, cls) => { $("#log").insertAdjacentHTML("afterbegin", `<li class="${cls}">${esc(msg)}</li>`); buzz(cls === "good"); };
   $("#stopscan").onclick = () => { stopSession(); viewScan(); };
@@ -382,33 +456,45 @@ async function runScan() {
     recent.set(tagKey, Date.now());
     if (!t.key) { log("This tag isn't registered to a vehicle", "bad"); return; }
     const v = vehicle(t.key.vehicleId);
-    const ev = { id: rid("e_"), keyId: t.key.id, vehicleId: t.key.vehicleId, action: mode, location: loc, person, at: Date.now() };
+    const ev = { id: rid("e_"), keyId: t.key.id, vehicleId: t.key.vehicleId, action: mode, location: loc, to, person, at: Date.now() };
     try {
       await store.put("events", ev); db.events.push(ev);
-      log(`${person} ${mode === "out" ? "took out" : "put"} ${vlabel(v)} key ${t.key.n} ${mode === "out" ? "from" : "into"} ${loc}`, "good");
+      const d = document.createElement("div"); d.innerHTML = describe(ev, `${vlabel(v)} key ${t.key.n}`);
+      log(d.textContent, "good");
     } catch (err) { log("Couldn't save: " + err.message, "bad"); }
   };
 }
 
 /* ---------- router ---------- */
-function route() {
-  stopSession();
+let ready = false;
+function render() {
   const h = location.hash;
   const m = h.match(/^#\/v\/([^/]+)/);
   if (m) viewVehicle(m[1]);
   else if (h.startsWith("#/scan")) viewScan();
   else viewHome();
-  window.scrollTo(0, 0);
 }
-window.addEventListener("hashchange", async () => { await load().catch(() => {}); route(); });
-window.addEventListener("pageshow", e => { if (e.persisted) load().then(route); });
+function route() { stopSession(); if (!ready) return; render(); window.scrollTo(0, 0); }
+window.addEventListener("hashchange", async () => { if (!ready) return; await load().catch(() => {}); route(); });
+window.addEventListener("pageshow", e => { if (e.persisted && ready) load().then(route); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && ready) refresh(); });
 
-(async () => {
+async function start() {
+  if (sb) {
+    const { data } = await sb.auth.getSession();
+    const user = data.session?.user;
+    if (!user) { renderWho(); viewLogin(); return; }
+    signedInName = user.user_metadata?.name || user.email.split("@")[0];
+  }
+  document.querySelector("nav").style.display = "";
   renderWho();
   $("#app").innerHTML = `<div class="empty">Loading…</div>`;
   try { await load(); } catch (e) { $("#app").innerHTML = `<div class="notice">Couldn't load data: ${esc(e.message)}</div>`; return; }
+  ready = true;
+  goLive();
   route();
-})();
+}
+start();
 </script>
 </body>
 </html>
