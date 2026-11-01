@@ -558,6 +558,7 @@ function viewActions() {
       ${tile("#/do/handover", "🤝", "Hand over", "Give keys to someone")}
       ${tile("#/keys", "🗂", "Where are the keys", "Every board, every person")}
       ${tile("#/map", "🗺", "Map", "See keys live on a map")}
+      ${tile("#/do/unregister", "🧹", "Unregister", "Free up a sticker to reuse", "wide")}
     </div>`;
 }
 
@@ -608,18 +609,20 @@ const JOBS = {
   out:      { title: "Take keys from a board", ask: "Which board?",               tap: "Tap each key on your phone" },
   handover: { title: "Hand keys over",         ask: "Who are you giving them to?", tap: "Tap each key on your phone" },
   check:    { title: "Check a key",            ask: "",                            tap: "Tap a key on your phone" },
+  unregister: { title: "Unregister a sticker", ask: "",                            tap: "Tap the sticker on your phone" },
 };
 
 function viewDo(mode) {
   const job = JOBS[mode];
   if (!job) { viewActions(); return; }
   setNav("home");
-  let choice = null;
+  let choice = null, paused = false;
+  const solo = mode === "check" || mode === "unregister";   // no board/person to pick first
   const opts = mode === "handover" ? PEOPLE.filter(p => p !== me()) : db.locations.map(l => l.name);
   $("#app").innerHTML = `${backHome}
     <h1 style="margin-top:10px">${job.title}</h1>
     ${nfcNotice()}
-    ${mode === "check" ? `
+    ${solo ? `
       <button class="primary big" id="startcheck" style="margin-top:6px">Start</button>` : `
       <div class="step"><i>1</i>${job.ask}</div>
       <div class="chips big">${opts.map(o => `<button data-c="${esc(o)}">${esc(o)}</button>`).join("")}
@@ -643,9 +646,11 @@ function viewDo(mode) {
   };
 
   const handle = async t => {
+    if (paused) return;
     if (!t) { log("Couldn't read that — try again", "bad"); return; }
-    if (!t.key) { log("That tag isn't registered to a vehicle", "bad"); return; }
+    if (!t.key) { log(mode === "unregister" ? "That sticker isn't registered to anything — it's free to use" : "That tag isn't registered to a vehicle", mode === "unregister" ? "warn" : "bad"); return; }
     const k = t.key, v = vehicle(k.vehicleId);
+    if (mode === "unregister") { paused = true; $("#log").innerHTML = ""; unregisterCard(k, v); buzz(true); return; }
     if (mode === "check") {
       const hist = db.events.filter(e => e.keyId === k.id).sort((a, b) => b.at - a.at).slice(0, 3);
       $("#log").innerHTML = "";
@@ -673,6 +678,44 @@ function viewDo(mode) {
     go();
   });
   if ($("#startcheck")) $("#startcheck").onclick = go;
+
+  /* unregister: confirm, release from the vehicle, optionally wipe the sticker */
+  function unregisterCard(k, v) {
+    $("#live").innerHTML = `<div class="card result">
+        <div class="plate">${esc(v?.vrm || "?")}</div>
+        <div style="font-size:20px;font-weight:700;margin-top:10px">${esc(v?.name || "Unknown vehicle")} · key ${k.n}</div>
+        <div style="margin:10px 0">${keyStatus(k)}</div>
+        <button class="primary big" id="unreg" style="background:var(--bad)">Unregister this sticker</button>
+        <button class="big" id="unregno" style="margin-top:8px">Cancel</button>
+      </div>`;
+    $("#unregno").onclick = () => { paused = false; $("#live").innerHTML = `<div class="listen"><div class="dot"></div><div>Ready — ${job.tap.toLowerCase()}</div></div>`; };
+    $("#unreg").onclick = async () => {
+      try {
+        await store.del("keys", k.id); db.keys = db.keys.filter(x => x.id !== k.id);
+        try { await store.del("pos", "pos_" + k.id); db.pos = db.pos.filter(x => x.id !== "pos_" + k.id); } catch {}
+      } catch (err) { toast("Couldn't unregister: " + err.message); return; }
+      ensureTracking();
+      $("#live").innerHTML = `<div class="card result">
+          <div style="font-size:20px;font-weight:700">✓ Unregistered</div>
+          <div class="muted" style="margin:6px 0 14px">${esc(v?.vrm || "")} key ${k.n} is no longer linked. The sticker can be registered to any vehicle.</div>
+          <button class="big" id="wipe">Also wipe the sticker</button>
+          <div class="muted" style="font-size:13px;margin-top:6px">Optional — tapping it will then do nothing until it's registered again.</div>
+          <button class="primary big" id="another" style="margin-top:14px">Unregister another</button>
+        </div>`;
+      $("#another").onclick = () => { paused = false; go(); };
+      $("#wipe").onclick = async () => {
+        stopSession();
+        const ctrl = new AbortController(); session = ctrl;
+        $("#wipe").outerHTML = `<div class="listen" id="wiping"><div class="dot"></div><div>Hold the sticker to your phone now…</div></div>`;
+        try {
+          await new NDEFReader().write({ records: [{ recordType: "empty" }] }, { signal: ctrl.signal });
+          $("#wiping").outerHTML = `<div class="pill in" style="font-size:15px">✓ Sticker wiped</div>`; buzz(true);
+        } catch (err) {
+          if ($("#wiping")) $("#wiping").outerHTML = `<div class="pill out" style="font-size:15px">Couldn't wipe it — it's still unregistered, which is enough</div>`;
+        } finally { if (session === ctrl) session = null; }
+      };
+    };
+  }
   if ($("#addloc")) $("#addloc").onclick = async () => {
     const n = (prompt("New board name, e.g. Key board 4") || "").trim(); if (!n) return;
     const l = { id: rid("l_"), name: n, order: db.locations.length }; await store.put("locations", l); db.locations.push(l); viewDo(mode);
