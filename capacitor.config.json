@@ -1,0 +1,8 @@
+{
+  "appId": "app.pillowfishsticks.keytags",
+  "appName": "Key Tags",
+  "webDir": "www",
+  "android": {
+    "useLegacyBridge": true
+  }
+}
