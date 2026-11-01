@@ -119,6 +119,8 @@ const SUPABASE_KEY = "sb_publishable_YzOjKCAZX2uTlFTvKb_NhQ_0tNxVvTi";
 <script>
 const NFC = "NDEFReader" in window;
 const PUBLIC_URL = "https://pillowfishsticks.github.io/key-tags/";
+/* what3words: paste your API key here (developer.what3words.com). Blank = plain map pins. */
+const W3W_KEY = "";
 const LS = "keytags.";
 const sb = (SUPABASE_URL && SUPABASE_KEY && window.supabase) ? supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const rid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -701,6 +703,25 @@ function mapGroups() {
   }
   return [...groups.values()];
 }
+/* what3words lookups: only when someone views a location, cached per ~1 m spot, never on every ping */
+const w3wCache = new Map(), w3wPending = new Set();
+const w3wSpot = (lat, lng) => lat.toFixed(5) + "," + lng.toFixed(5);
+function w3w(lat, lng) {
+  if (!W3W_KEY) return null;
+  const k = w3wSpot(lat, lng);
+  if (w3wCache.has(k)) return w3wCache.get(k);
+  if (!w3wPending.has(k)) {
+    w3wPending.add(k);
+    fetch(`https://api.what3words.com/v3/convert-to-3wa?coordinates=${k}&language=en&key=${encodeURIComponent(W3W_KEY)}`)
+      .then(r => r.json())
+      .then(d => { w3wCache.set(k, d && d.words ? { words: d.words, near: d.nearestPlace || "", sq: d.square } : { error: (d && d.error && d.error.message) || "lookup failed" }); })
+      .catch(() => w3wCache.set(k, { error: "lookup failed" }))
+      .finally(() => { w3wPending.delete(k); if (currentView === "map") updateMap(); });
+  }
+  return null;
+}
+const w3wLink = a => `<a href="https://what3words.com/${esc(a.words)}" target="_blank" rel="noopener" style="color:#e11f26;font-weight:700;text-decoration:none">///${esc(a.words)}</a>`;
+
 const ago = t => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : when(t); };
 async function viewMap() {
   setNav("map");
@@ -722,10 +743,14 @@ function updateMap() {
   for (const g of groups) {
     const ll = [g.pos.lat, g.pos.lng]; pts.push(ll);
     const colour = g.onBoard ? "#1a7f37" : "#d97706";
-    if (!g.onBoard && g.pos.acc) L.circle(ll, { radius: g.pos.acc, color: colour, weight: 1, fillOpacity: .08 }).addTo(mapLayer);
+    g.w3w = w3w(g.pos.lat, g.pos.lng);
+    if (g.w3w && g.w3w.sq) {
+      const sq = g.w3w.sq;   // the 3 m what3words square the key is in
+      L.rectangle([[sq.southwest.lat, sq.southwest.lng], [sq.northeast.lat, sq.northeast.lng]], { color: colour, weight: 2, fillOpacity: .25 }).addTo(mapLayer);
+    } else if (!g.onBoard && g.pos.acc) L.circle(ll, { radius: g.pos.acc, color: colour, weight: 1, fillOpacity: .08 }).addTo(mapLayer);
     L.circleMarker(ll, { radius: 10, color: "#fff", weight: 3, fillColor: colour, fillOpacity: 1 })
       .bindTooltip(`${g.onBoard ? "🗂" : "👤"} ${esc(g.name)} · ${g.keys.length}`, { permanent: true, direction: "top", offset: [0, -10], className: "mlabel" })
-      .bindPopup(`<b>${esc(g.name)}</b><br>${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join("<br>")}<br><span style="color:#888">${g.onBoard ? "Put on board" : "Updated"} ${ago(g.pos.at)}</span>`)
+      .bindPopup(`<b>${esc(g.name)}</b><br>${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join("<br>")}${g.w3w && g.w3w.words ? "<br>" + w3wLink(g.w3w) : ""}<br><span style="color:#888">${g.onBoard ? "Put on board" : "Updated"} ${ago(g.pos.at)}</span>`)
       .addTo(mapLayer);
   }
   if (!mapFitted && pts.length) { map.fitBounds(pts, { padding: [40, 40], maxZoom: 17 }); mapFitted = true; }
@@ -733,9 +758,11 @@ function updateMap() {
     <div class="card" data-g="${esc(g.pos.lat + "," + g.pos.lng)}" style="cursor:pointer">
       <div class="row"><b class="grow">${g.onBoard ? "🗂" : "👤"} ${esc(g.name)}</b>
         <span class="pill ${g.onBoard ? "in" : "out"}">${g.onBoard ? "On board" : "Live"} · ${ago(g.pos.at)}</span></div>
+      ${g.w3w && g.w3w.words ? `<div style="margin-top:6px;font-size:17px">${w3wLink(g.w3w)}${g.w3w.near ? ` <span class="muted">near ${esc(g.w3w.near)}</span>` : ""}${g.pos.acc ? ` <span class="muted">· ±${g.pos.acc} m</span>` : ""}</div>`
+        : g.w3w && g.w3w.error ? `<div class="muted" style="margin-top:6px">what3words: ${esc(g.w3w.error)}</div>` : ""}
       <div class="muted" style="margin-top:4px">${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join(" · ")}</div>
     </div>`).join("") : `<div class="empty">No key locations yet. They appear once someone books in, takes or hands over keys with location allowed.</div>`;
-  document.querySelectorAll("[data-g]").forEach(c => c.onclick = () => { const [a, b] = c.dataset.g.split(",").map(Number); map.setView([a, b], 17); window.scrollTo(0, 0); });
+  document.querySelectorAll("[data-g]").forEach(c => c.onclick = ev => { if (ev.target.closest("a")) return; const [a, b] = c.dataset.g.split(",").map(Number); map.setView([a, b], 19); window.scrollTo(0, 0); });
 }
 setInterval(() => { if (currentView === "map") updateMap(); }, 5000);   // keep "x s ago" fresh
 
