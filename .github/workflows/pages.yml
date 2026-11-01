@@ -1,0 +1,60 @@
+name: Publish website
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# one publish at a time; a newer push replaces a queued one
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.final.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect site files
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      # GitHub sometimes still thinks the previous publish is running; wait and retry instead of failing
+      - id: try1
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - if: steps.try1.outcome == 'failure'
+        run: sleep 90
+
+      - id: try2
+        if: steps.try1.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+        run: sleep 180
+
+      - id: try3
+        if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+
+      - id: final
+        run: echo "url=${{ steps.try1.outputs.page_url || steps.try2.outputs.page_url || steps.try3.outputs.page_url }}" >> "$GITHUB_OUTPUT"
