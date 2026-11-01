@@ -117,41 +117,8 @@ const SUPABASE_KEY = "sb_publishable_YzOjKCAZX2uTlFTvKb_NhQ_0tNxVvTi";
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-/* Installed Android app (Capacitor) vs plain browser */
-const NATIVE = !!(window.KT_NATIVE && KT_NATIVE.Capacitor.isNativePlatform());
-const NFC = NATIVE || "NDEFReader" in window;
+const NFC = "NDEFReader" in window;
 const PUBLIC_URL = "https://pillowfishsticks.github.io/key-tags/";
-
-/* Same shape as the browser's NDEFReader, backed by the native NFC plugin inside the app */
-const URI_PREFIX = { 0: "", 1: "http://www.", 2: "https://www.", 3: "http://", 4: "https://" };
-class NativeReader {
-  async scan({ signal } = {}) {
-    const P = KT_NATIVE.CapacitorNfc;
-    const handle = await P.addListener("nfcEvent", ev => {
-      const tag = ev.tag || {};
-      const records = (tag.ndefMessage || []).map(r => {
-        const type = String.fromCharCode(...(r.type || []));
-        const pl = r.payload || [];
-        if (r.tnf === 1 && type === "U") {
-          const url = (URI_PREFIX[pl[0]] || "") + new TextDecoder().decode(new Uint8Array(pl.slice(1)));
-          return { recordType: "url", data: new TextEncoder().encode(url) };
-        }
-        if (r.tnf === 3) return { recordType: "absolute-url", data: new TextEncoder().encode(type) };
-        return { recordType: "unknown", data: new Uint8Array(pl) };
-      });
-      const serialNumber = (tag.id || []).map(b => (b & 255).toString(16).padStart(2, "0")).join(":");
-      if (this.onreading) this.onreading({ serialNumber, message: { records } });
-    });
-    await P.startScanning();
-    if (signal) signal.addEventListener("abort", () => { handle.remove(); P.stopScanning().catch(() => {}); });
-  }
-  async write({ records }) {
-    const url = typeof records[0].data === "string" ? records[0].data : new TextDecoder().decode(records[0].data);
-    const bytes = [...new TextEncoder().encode(url.replace(/^https:\/\//, ""))];
-    await KT_NATIVE.CapacitorNfc.write({ allowFormat: true, records: [{ tnf: 1, type: [0x55], id: [], payload: [0x04, ...bytes] }] });
-  }
-}
-const makeReader = () => NATIVE ? new NativeReader() : new NDEFReader();
 const LS = "keytags.";
 const sb = (SUPABASE_URL && SUPABASE_KEY && window.supabase) ? supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const rid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -332,32 +299,14 @@ function myHeldKeys() {
 }
 function ensureTracking() {
   const held = myHeldKeys();
-  if (held.length && watchId === null && NATIVE) {
-    watchId = "starting";
-    KT_NATIVE.BackgroundGeolocation.addWatcher(
-      { backgroundTitle: "Key Tags", backgroundMessage: "Sharing your location while you hold keys", requestPermissions: true, stale: false, distanceFilter: 0 },
-      (loc, err) => {
-        if (err) {
-          trackErr = err.code === "NOT_AUTHORIZED" ? "Location is off for Key Tags — allow it (“All the time”) in settings" : "Waiting for location…";
-          if (err.code === "NOT_AUTHORIZED" && confirm("Key Tags needs location to show where keys are. Open settings?")) KT_NATIVE.BackgroundGeolocation.openSettings();
-          renderTracking(); return;
-        }
-        fix = { lat: loc.latitude, lng: loc.longitude, acc: Math.round(loc.accuracy), at: Date.now() }; trackErr = "";
-        if (Date.now() - lastPing >= 10000) ping();   // keeps going with the phone locked
-        renderTracking();
-      }).then(id => { if (watchId === "starting") watchId = id; else KT_NATIVE.BackgroundGeolocation.removeWatcher({ id }); });
-  } else if (held.length && watchId === null && "geolocation" in navigator) {
+  if (held.length && watchId === null && "geolocation" in navigator) {
     watchId = navigator.geolocation.watchPosition(
       p => { fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), at: Date.now() }; trackErr = ""; renderTracking(); },
       err => { trackErr = err.code === 1 ? "Location is blocked — allow it for this site so others can see where the keys are" : "Waiting for location…"; renderTracking(); },
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
   }
-  if (!held.length && watchId !== null) {
-    if (NATIVE) { if (watchId !== "starting") KT_NATIVE.BackgroundGeolocation.removeWatcher({ id: watchId }); }
-    else navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-  if (!NATIVE) keepAwake(held.length > 0);   // the app tracks in the background, no need to keep the screen on
+  if (!held.length && watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  keepAwake(held.length > 0);
   if (!pingTimer) pingTimer = setInterval(ping, 10000);
   renderTracking();
 }
@@ -379,7 +328,7 @@ function renderTracking() {
   const el = $("#track"), n = myHeldKeys().length;
   el.classList.toggle("on", n > 0);
   el.textContent = !n ? "" : trackErr ? "📍 " + trackErr
-    : `📍 Sharing your location for ${n} key${n === 1 ? "" : "s"}${NATIVE ? " — works with your phone locked" : wakeLock ? " — screen kept on, leave this app open" : " — keep this app open"}`;
+    : `📍 Sharing your location for ${n} key${n === 1 ? "" : "s"}${wakeLock ? " — screen kept on, leave this app open" : " — keep this app open"}`;
 }
 let lastPing = 0;
 async function ping() {
@@ -389,23 +338,9 @@ async function ping() {
   if (now - lastPing < 9000) return;
   lastPing = now;
   const rows = held.map(k => ({ id: "pos_" + k.id, keyId: k.id, lat: fix.lat, lng: fix.lng, acc: fix.acc, at: now, by: me(), state: "held" }));
-  try { await pushPos(rows); rows.forEach(upsertPos); if (currentView === "map") updateMap(); } catch {}
+  try { await store.putMany("pos", rows); rows.forEach(upsertPos); if (currentView === "map") updateMap(); } catch {}
 }
-/* in the app, send pings through native HTTP: the WebView's own requests get throttled once the phone is locked */
-async function pushPos(rows) {
-  if (NATIVE && sb) {
-    const { data } = await sb.auth.getSession();
-    const token = data.session && data.session.access_token;
-    if (!token) return;
-    await KT_NATIVE.CapacitorHttp.post({
-      url: SUPABASE_URL + "/rest/v1/items?on_conflict=id",
-      headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + token, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
-      data: rows.map(({ id, ...d }) => ({ id, kind: "pos", data: d })),
-    });
-    return;
-  }
-  await store.putMany("pos", rows);
-}
+
 /* stamp a key's location the moment it's scanned (first ping, or its final spot on a board) */
 function stampPos(k, state) {
   const write = async f => {
@@ -572,7 +507,7 @@ async function runRegister(host, v, count) {
   $("#stop").onclick = finish;
 
   const ctrl = new AbortController(); session = ctrl;
-  const reader = makeReader();
+  const reader = new NDEFReader();
   try { await reader.scan({ signal: ctrl.signal }); }
   catch (e) { log("Couldn't start NFC: " + e.message + " — is NFC switched on?", "bad"); return; }
 
@@ -654,7 +589,7 @@ function viewBook() {
 async function startReader(onTag) {
   stopSession();
   const ctrl = new AbortController(); session = ctrl;
-  const reader = makeReader();
+  const reader = new NDEFReader();
   await reader.scan({ signal: ctrl.signal });
   const recent = new Map();
   reader.onreadingerror = () => onTag(null);
