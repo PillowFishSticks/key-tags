@@ -3,7 +3,7 @@ name: Publish website
 on:
   push:
     branches: [main]
-    paths: ["index.html", ".github/workflows/pages.yml"]
+    paths: ["index.html", "sw.js", "manifest.webmanifest", "icons/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
       - name: Collect site files
         run: |
           mkdir -p _site
-          cp index.html _site/
+          cp -r index.html sw.js manifest.webmanifest icons _site/
           # version stamp shown at the bottom of the app: publish number + time
           sed -i "s/__BUILD__/${{ github.run_number }} · $(TZ=Europe/London date +'%-d %b %H:%M')/" _site/index.html
           touch _site/.nojekyll

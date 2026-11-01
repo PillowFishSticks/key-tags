@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#111418">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Key Tags">
 <title>Key Tags</title>
 <style>
 :root{
@@ -806,6 +813,7 @@ function viewActions() {
     <input id="hq" placeholder="🔍 Find a reg" autocomplete="off" style="font-size:18px;text-transform:uppercase;margin-top:14px">
     <div id="hresults"></div>
     <a href="#/book" style="display:block;margin-top:12px"><button class="big">🚗 Book in a vehicle</button></a>
+    ${installHint()}
     ${mineNow.length ? `<h2>Keys you have</h2>${mineNow.map(k => { const v = vehicle(k.vehicleId);
       return `<a class="vlink card row" href="#/v/${k.vehicleId}/k/${k.id}"><span class="plate">${esc(v?.vrm || "?")}</span><span class="grow">${esc(v?.name || "")}</span><span class="muted">Key ${k.n}</span></a>`; }).join("")}` : ""}`;
 
@@ -881,8 +889,27 @@ function viewActions() {
       : `<div class="muted" style="margin-top:8px">No keys match "${esc(q)}"</div>`;
   };
   $("#hq").oninput = showResults;
+  bindInstall();
 }
 let showKeyExternal = () => {}, homeShown = null, doneTimer = null;
+
+/* ---------- install as an app ---------- */
+let installPrompt = null;
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installPrompt = e; if (location.hash === "" || location.hash === "#/") { const el = $("#install"); if (el) el.outerHTML = installHint(); bindInstall(); } });
+window.addEventListener("appinstalled", () => { installPrompt = null; const el = $("#install"); if (el) el.remove(); toast("✓ Installed — open Key Tags from your home screen"); });
+function installHint() {
+  if (isStandalone()) return "";
+  if (installPrompt) return `<button class="big" id="install" style="margin-top:10px">📲 Install the app</button>`;
+  if (isIOS()) return `<div class="card muted" id="install" style="margin-top:10px;font-size:14px">📲 To install: tap <b>Share</b> then <b>Add to Home Screen</b>.</div>`;
+  return `<span id="install"></span>`;
+}
+function bindInstall() {
+  const b = $("#install"); if (!b || !installPrompt || b.tagName !== "BUTTON") return;
+  b.onclick = async () => { installPrompt.prompt(); try { await installPrompt.userChoice; } catch {} installPrompt = null; b.remove(); };
+}
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 
 /* a sticker that isn't registered yet: make it a key (pick vehicle) or a peg (pick board + number), then hold it again to save */
 function newSticker(t) {
