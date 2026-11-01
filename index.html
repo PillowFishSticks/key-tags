@@ -101,8 +101,12 @@ a.vlink{color:inherit;text-decoration:none}
 .offer button{flex:1;padding:10px}
 .offer .yes{background:var(--card);color:var(--ink)}
 .offer .no{background:transparent;color:var(--accent-ink);border:1px solid var(--accent-ink)}
-#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:15px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%}
-#toast.show{opacity:1}
+#toast{position:fixed;z-index:50;left:12px;right:12px;top:calc(10px + env(safe-area-inset-top));max-width:616px;margin:0 auto;
+  background:var(--ink);color:var(--bg);padding:14px 16px;border-radius:14px;font-size:16px;font-weight:700;box-shadow:0 8px 24px #0006;
+  transform:translateY(-140%);opacity:0;transition:transform .25s ease,opacity .25s ease}
+#toast.show{transform:translateY(0);opacity:1}
+#toast.good{background:var(--good);color:#fff}
+#toast.bad{background:var(--bad);color:#fff}
 </style>
 </head>
 <body>
@@ -201,7 +205,14 @@ const keysFor = vid => db.keys.filter(k => k.vehicleId === vid).sort((a, b) => a
 const lastEvent = kid => db.events.filter(e => e.keyId === kid).sort((a, b) => b.at - a.at)[0];
 const tagUrl = (vid, kid) => `${PUBLIC_URL}#/v/${vid}/k/${kid}`;
 const when = t => new Date(t).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2500); }
+/* flash message across the top: green for done, red for problems; tap to dismiss */
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg;
+  t.className = /^✓/.test(msg) ? "good" : /couldn't|can't|isn't|not /i.test(msg) ? "bad" : "";
+  void t.offsetWidth; t.classList.add("show"); buzz(!t.classList.contains("bad"));
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3000);
+}
+document.addEventListener("click", e => { if (e.target.id === "toast") e.target.classList.remove("show"); });
 function buzz(ok) { try { navigator.vibrate && navigator.vibrate(ok ? 80 : [60, 60, 60]); } catch {} }
 
 function keyStatus(k) {
@@ -712,6 +723,7 @@ function bindKeyActions(scope, again) {
   scope.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
     const k = db.keys.find(x => x.id === b.dataset.k); if (!k) return;
     const act = b.dataset.act;
+    if (act === "take" || act === "give") { b.disabled = true; b.textContent = "Saving…"; }
     try {
       if (act === "take") {
         const who = keyHolder(k);
@@ -992,10 +1004,8 @@ function unregTap(t) {
   };
 }
 function showDone(msg) {
-  const el = $("#tapped"); if (!el) return;
-  el.innerHTML = `<div class="card" style="border:2px solid var(--good);background:var(--good-bg);color:var(--good);font-weight:700;font-size:17px">✓ ${esc(msg)}</div>`;
-  clearTimeout(doneTimer);
-  doneTimer = setTimeout(() => { if ($("#tapped") && !homeShown) $("#tapped").innerHTML = ""; }, 5000);
+  if ($("#tapped")) $("#tapped").innerHTML = "";
+  toast("✓ " + msg);
 }
 
 /* ---------- book in: vehicle details, then tap its keys ---------- */
