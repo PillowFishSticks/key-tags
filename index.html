@@ -213,6 +213,7 @@ function keyStatus(k) {
 function holder(e) { return e.action === "handover" ? e.to : e.person; }
 function describe(e, what) {
   if (e.action === "bookin") return `<b>${esc(e.person)}</b> booked in ${what}`;
+  if (e.action === "handover" && e.taken) return `<b>${esc(e.to)}</b> took ${what} from <b>${esc(e.person)}</b>`;
   if (e.action === "handover") return `<b>${esc(e.person)}</b> handed ${what} to <b>${esc(e.to)}</b>`;
   const where = e.location ? ` ${e.action === "out" ? "from" : "on"} ${esc(e.location)}${e.peg ? " · peg " + e.peg : ""}` : "";
   return `<b>${esc(e.person)}</b> ${e.action === "out" ? "took" : "put"} ${what}${where}`;
@@ -466,8 +467,23 @@ function viewVehicles() {
   document.querySelectorAll("[data-reg]").forEach(b => b.onclick = () => registerPanel($("#reg"), vehicle(b.dataset.reg)));
 }
 
+function keyActions(k) {
+  const who = keyHolder(k), place = keyPlace(k), e = lastEvent(k.id);
+  const offer = db.offers.find(o => o.keyId === k.id);
+  if (!me()) return "";
+  if (who === me()) return `
+      <div class="row" style="margin-top:10px;gap:8px">
+        <button class="primary grow" data-act="puton" data-k="${k.id}">Put on board</button>
+        <button class="grow" data-act="give" data-k="${k.id}">Hand over</button>
+      </div>
+      ${offer ? `<div class="muted" style="margin-top:6px">Waiting for ${esc(offer.to)} to accept</div>` : ""}
+      <div class="qa" id="qa_${k.id}"></div>`;
+  const label = place ? "Take it" : who ? `Take from ${esc(who)}` : "Take it";
+  return `<button class="primary big" style="margin-top:10px" data-act="take" data-k="${k.id}">${label}</button>`;
+}
 function viewVehicle(vid) {
   setNav("");
+  const scanned = (location.hash.match(/\/k\/([^/?#]+)/) || [])[1];
   const v = vehicle(vid);
   if (!v) { $("#app").innerHTML = `<div class="empty">This tag isn't linked to a vehicle any more.<br><br><a href="#/vehicles">Back to vehicles</a></div>`; return; }
   const ks = keysFor(vid);
@@ -477,9 +493,10 @@ function viewVehicle(vid) {
     <h1 style="margin-top:10px">${esc(v.name)}</h1>
     <div><span class="plate" style="font-size:22px;padding:4px 12px">${esc(v.vrm)}</span></div>
     <h2>Keys</h2>
-    ${ks.length ? ks.map(k => `<div class="card row">
-        <div class="grow"><div style="font-weight:600">Key ${k.n}</div><div style="margin-top:4px">${keyStatus(k)}</div></div>
-        <button class="danger" data-rel="${k.id}">Release</button>
+    ${ks.length ? ks.slice().sort((a, b) => (b.id === scanned) - (a.id === scanned) || a.n - b.n).map(k => `<div class="card" ${k.id === scanned ? 'style="border:2px solid var(--accent)"' : ""}>
+        <div class="row"><div class="grow"><div style="font-weight:600">Key ${k.n}${k.id === scanned ? ` <span class="pill new">You scanned this</span>` : ""}</div>
+          <div style="margin-top:4px">${keyStatus(k)}</div></div></div>
+        ${keyActions(k)}
       </div>`).join("") : `<div class="card muted">No keys registered yet.</div>`}
     ${NFC ? `<button class="primary big" id="regbtn" style="margin-top:6px">Register keys</button>` : ""}
     <div id="reg"></div>
@@ -490,9 +507,43 @@ function viewVehicle(vid) {
     }).join("")}</ul>` : `<span class="muted">Nothing yet.</span>`}</div>
     <button class="danger" id="delv" style="margin-top:24px">Delete vehicle</button>`;
   if (NFC) $("#regbtn").onclick = () => registerPanel($("#reg"), v);
-  document.querySelectorAll("[data-rel]").forEach(b => b.onclick = async () => {
-    if (!confirm("Release this key? Its sticker can then be registered to another vehicle.")) return;
-    await store.del("keys", b.dataset.rel); db.keys = db.keys.filter(k => k.id !== b.dataset.rel); viewVehicle(vid);
+  const again = () => { const y = window.scrollY; viewVehicle(vid); window.scrollTo(0, y); };
+  document.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
+    const k = db.keys.find(x => x.id === b.dataset.k); if (!k) return;
+    const act = b.dataset.act;
+    try {
+      if (act === "take") {
+        const who = keyHolder(k);
+        const ev = who && who !== me()
+          ? await saveMove(k, "handover", { person: who, to: me(), taken: true })
+          : await saveMove(k, "out", { person: me() });
+        toast("✓ " + describe(ev, "key " + k.n).replace(/<[^>]+>/g, ""));
+        again(); return;
+      }
+      const box = $("#qa_" + k.id);
+      if (act === "puton") {
+        box.innerHTML = `<div class="chips" style="margin-top:10px">${db.locations.map(l => `<button data-board="${l.id}">${esc(l.name)}</button>`).join("")}</div>
+          <div class="row" style="margin-top:8px"><input id="pegn_${k.id}" type="number" min="1" placeholder="Peg no. (optional)" style="width:170px"><button class="primary grow" id="puton_${k.id}" disabled>Save</button></div>`;
+        let board = null;
+        box.querySelectorAll("[data-board]").forEach(c => c.onclick = () => {
+          board = boardById(c.dataset.board); box.querySelectorAll("[data-board]").forEach(x => x.classList.toggle("on", x === c)); $("#puton_" + k.id).disabled = false;
+        });
+        $("#puton_" + k.id).onclick = async () => {
+          const n = parseInt($("#pegn_" + k.id).value, 10) || null;
+          await saveMove(k, "in", { location: board.name, peg: n, person: me() });
+          toast(`✓ Key ${k.n} on ${board.name}${n ? " · peg " + n : ""}`); again();
+        };
+      }
+      if (act === "give") {
+        box.innerHTML = `<div class="muted" style="margin-top:10px">Hand to — they'll get an Accept button:</div>
+          <div class="chips" style="margin-top:6px">${PEOPLE.filter(p => p !== me()).map(p => `<button data-to="${p}">${p}</button>`).join("")}</div>`;
+        box.querySelectorAll("[data-to]").forEach(c => c.onclick = async () => {
+          const o = { id: "o_" + k.id, keyId: k.id, from: me(), to: c.dataset.to, at: Date.now() };
+          await store.put("offers", o); db.offers = db.offers.filter(x => x.id !== o.id).concat(o);
+          toast(`Sent — waiting for ${o.to} to accept`); again();
+        });
+      }
+    } catch (err) { toast("Couldn't save: " + err.message); }
   });
   $("#delv").onclick = async () => {
     if (!confirm(`Delete ${v.name} and release its keys?`)) return;
@@ -859,24 +910,12 @@ function viewDo(mode) {
   });
   if ($("#startcheck")) $("#startcheck").onclick = go;
 
-  /* unregister: confirm, release, optionally wipe the sticker */
-  const offerWipe = html => {
-    $("#live").innerHTML = `<div class="card result">${html}
-        <button class="big" id="wipe">Also wipe the sticker</button>
-        <div class="muted" style="font-size:13px;margin-top:6px">Optional — tapping it will then do nothing until it's registered again.</div>
-        <button class="primary big" id="another" style="margin-top:14px">Unregister another</button></div>`;
+  /* unregister: confirm, release, done */
+  const unregistered = msg => {
+    $("#live").innerHTML = `<div class="card result"><div style="font-size:20px;font-weight:700">✓ Unregistered</div>
+      <div class="muted" style="margin:6px 0 14px">${msg}</div>
+      <button class="primary big" id="another">Unregister another</button></div>`;
     $("#another").onclick = () => { paused = false; go(); };
-    $("#wipe").onclick = async () => {
-      stopSession();
-      const ctrl = new AbortController(); session = ctrl;
-      $("#wipe").outerHTML = `<div class="listen" id="wiping"><div class="dot"></div><div>Hold the sticker to your phone now…</div></div>`;
-      try {
-        await new NDEFReader().write({ records: [{ recordType: "empty" }] }, { signal: ctrl.signal });
-        $("#wiping").outerHTML = `<div class="pill in" style="font-size:15px">✓ Sticker wiped</div>`; buzz(true);
-      } catch (err) {
-        if ($("#wiping")) $("#wiping").outerHTML = `<div class="pill out" style="font-size:15px">Couldn't wipe it — it's still unregistered, which is enough</div>`;
-      } finally { if (session === ctrl) session = null; }
-    };
   };
   function unregisterCard(k, v) {
     $("#live").innerHTML = `<div class="card result">
@@ -894,8 +933,7 @@ function viewDo(mode) {
         try { await store.del("offers", "o_" + k.id); db.offers = db.offers.filter(x => x.id !== "o_" + k.id); } catch {}
       } catch (err) { toast("Couldn't unregister: " + err.message); return; }
       ensureTracking();
-      offerWipe(`<div style="font-size:20px;font-weight:700">✓ Unregistered</div>
-        <div class="muted" style="margin:6px 0 14px">${esc(v?.vrm || "")} key ${k.n} is no longer linked. The sticker can be registered to any vehicle.</div>`);
+      unregistered(`${esc(v?.vrm || "")} key ${k.n} is no longer linked. The sticker can be used again.`);
     };
   }
   function unregisterPegCard(peg) {
@@ -908,8 +946,7 @@ function viewDo(mode) {
     $("#unreg").onclick = async () => {
       try { await store.del("pegs", peg.id); db.pegs = db.pegs.filter(x => x.id !== peg.id); }
       catch (err) { toast("Couldn't unregister: " + err.message); return; }
-      offerWipe(`<div style="font-size:20px;font-weight:700">✓ Peg sticker unregistered</div>
-        <div class="muted" style="margin:6px 0 14px">${esc(pegLabel(peg))} no longer has a sticker. You can set it up again from the board.</div>`);
+      unregistered(`${esc(pegLabel(peg))} no longer has a sticker. The sticker can be used again.`);
     };
   }
 }
