@@ -29,6 +29,8 @@ jobs:
         run: |
           mkdir -p _site
           cp index.html _site/
+          # version stamp shown at the bottom of the app: publish number + time
+          sed -i "s/__BUILD__/${{ github.run_number }} · $(TZ=Europe/London date +'%-d %b %H:%M')/" _site/index.html
           touch _site/.nojekyll
 
       - uses: actions/configure-pages@v5
