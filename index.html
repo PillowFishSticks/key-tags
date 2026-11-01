@@ -795,7 +795,12 @@ function viewActions() {
     shown = k ? k.id : null; homeShown = shown;
     if (!k) { $("#tapped").innerHTML = ""; return; }
     $("#tapped").innerHTML = keyCard(k);
-    bindKeyActions($("#tapped"), gone => { if (!$("#tapped")) return; const kk = !gone && db.keys.find(x => x.id === shown); kk ? showKey(kk) : showKey(null); renderMine(); });
+    bindKeyActions($("#tapped"), () => {
+      const msg = ($("#toast").textContent || "Done").replace(/^✓\s*/, "");
+      shown = null; homeShown = null;
+      if (location.hash === "" || location.hash === "#/") { const y = window.scrollY; viewActions(); window.scrollTo(0, y); }
+      showDone(msg);
+    });
   };
   const renderMine = () => { if (location.hash === "" || location.hash === "#/") { const y = window.scrollY; const keep = shown; viewActions(); if (keep) { const kk = db.keys.find(x => x.id === keep); if (kk) showKeyExternal(kk); } window.scrollTo(0, y); } };
   showKeyExternal = showKey;
@@ -827,7 +832,13 @@ function viewActions() {
   };
   $("#hq").oninput = showResults;
 }
-let showKeyExternal = () => {}, homeShown = null;
+let showKeyExternal = () => {}, homeShown = null, doneTimer = null;
+function showDone(msg) {
+  const el = $("#tapped"); if (!el) return;
+  el.innerHTML = `<div class="card" style="border:2px solid var(--good);background:var(--good-bg);color:var(--good);font-weight:700;font-size:17px">✓ ${esc(msg)}</div>`;
+  clearTimeout(doneTimer);
+  doneTimer = setTimeout(() => { if ($("#tapped") && !homeShown) $("#tapped").innerHTML = ""; }, 5000);
+}
 
 /* ---------- book in: vehicle details, then tap its keys ---------- */
 function viewBook() {
