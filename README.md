@@ -1,7 +1,9 @@
 # Key Tags
 
-NFC key-tag prototype: register stickers to vehicles, scan keys in and out of lockers.
+**Open the app: https://pillowfishsticks.github.io/key-tags/**
 
-Open in Chrome on Android to register/scan. Any phone can tap a registered tag to open its vehicle page.
+NFC key-tag tracker for vehicles: book in a vehicle and register its key stickers, put keys on and take them off key boards, hand keys over, check a key, unregister stickers, and see where every key is on the boards or on a live map.
 
-Shared data: run `supabase.sql` in Supabase, then fill `SUPABASE_URL` and `SUPABASE_KEY` at the top of `index.html`.
+- Sign in as Mark, Chris or Peter.
+- Registering and scanning stickers needs **Chrome on an Android phone**. Any phone can tap a registered sticker to open its vehicle.
+- Data is shared live between phones (Supabase). Setup SQL is in `supabase.sql`.
