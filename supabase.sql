@@ -12,3 +12,5 @@ alter table items enable row level security;
 -- Prototype only: anyone with the app link can read and write.
 create policy "prototype open access" on items
   for all using (true) with check (true);
+
+grant select, insert, update, delete on items to anon, authenticated;
