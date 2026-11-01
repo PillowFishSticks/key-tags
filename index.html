@@ -85,6 +85,10 @@ a.vlink{color:inherit;text-decoration:none}
 @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 60%,transparent)}100%{box-shadow:0 0 0 14px transparent}}
 .result{text-align:center;padding:20px 14px}
 .result .plate{font-size:28px;padding:6px 16px}
+#track{display:none;max-width:640px;margin:8px auto 0;font-size:13px;font-weight:600;border-radius:10px;padding:7px 10px;background:var(--warn-bg);color:var(--warn)}
+#track.on{display:block}
+#map{height:55vh;min-height:300px;border-radius:var(--radius);border:1px solid var(--line);margin-bottom:12px;z-index:0}
+.mlabel{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:2px 6px;font-weight:700;font-size:12px;box-shadow:0 1px 3px #0003}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:15px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%}
 #toast.show{opacity:1}
 </style>
@@ -98,8 +102,10 @@ a.vlink{color:inherit;text-decoration:none}
   <nav>
     <a href="#/" data-nav="home">Home</a>
     <a href="#/keys" data-nav="keys">Keys</a>
+    <a href="#/map" data-nav="map">Map</a>
     <a href="#/vehicles" data-nav="vehicles">Vehicles</a>
   </nav>
+  <div id="track"></div>
 </header>
 <main id="app"></main>
 <div id="toast"></div>
@@ -140,16 +146,25 @@ const store = {
     if (i >= 0) a[i] = obj; else a.push(obj);
     localStorage[LS + kind] = JSON.stringify(a);
   },
+  async putMany(kind, objs) {
+    if (!objs.length) return;
+    if (sb) {
+      const { error } = await sb.from("items").upsert(objs.map(({ id, ...data }) => ({ id, kind, data })));
+      if (error) throw error;
+      return;
+    }
+    for (const o of objs) await store.put(kind, o);
+  },
   async del(kind, id) {
     if (sb) { const { error } = await sb.from("items").delete().eq("id", id); if (error) throw error; return; }
     localStorage[LS + kind] = JSON.stringify((await store.all(kind)).filter(x => x.id !== id));
   }
 };
 
-let db = { vehicles: [], keys: [], events: [], locations: [] };
+let db = { vehicles: [], keys: [], events: [], locations: [], pos: [] };
 async function load() {
-  const [vehicles, keys, events, locations] = await Promise.all(["vehicles", "keys", "events", "locations"].map(k => store.all(k)));
-  db = { vehicles, keys, events, locations };
+  const [vehicles, keys, events, locations, pos] = await Promise.all(["vehicles", "keys", "events", "locations", "pos"].map(k => store.all(k)));
+  db = { vehicles, keys, events, locations, pos };
   if (!db.locations.length) {
     for (const [i, n] of ["Key board 1", "Key board 2", "Key board 3"].entries()) {
       const l = { id: "l_" + i, name: n, order: i }; db.locations.push(l); await store.put("locations", l);
@@ -252,7 +267,12 @@ let liveTimer = null, liveChannel = null;
 function goLive() {
   if (!sb || liveChannel) return;
   liveChannel = sb.channel("items-live")
-    .on("postgres_changes", { event: "*", schema: "public", table: "items" }, () => {
+    .on("postgres_changes", { event: "*", schema: "public", table: "items" }, payload => {
+      if (payload.new && payload.new.kind === "pos") {
+        upsertPos({ id: payload.new.id, ...payload.new.data });
+        if (currentView === "map") updateMap();
+        return;
+      }
       clearTimeout(liveTimer);
       liveTimer = setTimeout(refresh, 400);
     })
@@ -263,7 +283,55 @@ async function refresh() {
   // don't redraw mid-scan or while someone is typing; the data is still updated underneath
   const typing = document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName);
   if (session || typing || document.querySelector("#reg .panel")) return;
+  ensureTracking();
+  if (currentView === "map") { updateMap(); return; }
   const y = window.scrollY; render(); window.scrollTo(0, y);
+}
+
+/* ---------- live location: one row per key, overwritten every 10 s ---------- */
+let fix = null, watchId = null, pingTimer = null, trackErr = "";
+const upsertPos = r => { const i = db.pos.findIndex(x => x.id === r.id); if (i >= 0) db.pos[i] = r; else db.pos.push(r); };
+const posFor = kid => db.pos.find(p => p.id === "pos_" + kid);
+function myHeldKeys() {
+  if (!me()) return [];
+  return db.keys.filter(k => { const e = lastEvent(k.id); return e && e.action !== "in" && holder(e) === me(); });
+}
+function ensureTracking() {
+  const held = myHeldKeys();
+  if (held.length && watchId === null && "geolocation" in navigator) {
+    watchId = navigator.geolocation.watchPosition(
+      p => { fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), at: Date.now() }; trackErr = ""; renderTracking(); },
+      err => { trackErr = err.code === 1 ? "Location is blocked — allow it for this site so others can see where the keys are" : "Waiting for location…"; renderTracking(); },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  }
+  if (!held.length && watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (!pingTimer) pingTimer = setInterval(ping, 10000);
+  renderTracking();
+}
+function renderTracking() {
+  const el = $("#track"), n = myHeldKeys().length;
+  el.classList.toggle("on", n > 0);
+  el.textContent = !n ? "" : trackErr ? "📍 " + trackErr
+    : `📍 Sharing your location for ${n} key${n === 1 ? "" : "s"} — keep this app open`;
+}
+async function ping() {
+  const held = myHeldKeys();
+  if (!held.length || !fix) return;
+  const now = Date.now();
+  const rows = held.map(k => ({ id: "pos_" + k.id, keyId: k.id, lat: fix.lat, lng: fix.lng, acc: fix.acc, at: now, by: me(), state: "held" }));
+  try { await store.putMany("pos", rows); rows.forEach(upsertPos); if (currentView === "map") updateMap(); } catch {}
+}
+/* stamp a key's location the moment it's scanned (first ping, or its final spot on a board) */
+function stampPos(k, state) {
+  const write = async f => {
+    const r = { id: "pos_" + k.id, keyId: k.id, lat: f.lat, lng: f.lng, acc: f.acc, at: Date.now(), by: me(), state };
+    try { await store.put("pos", r); upsertPos(r); } catch {}
+  };
+  if (fix && Date.now() - fix.at < 60000) { write(fix); return; }
+  if (!("geolocation" in navigator)) return;
+  navigator.geolocation.getCurrentPosition(
+    p => { fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), at: Date.now() }; write(fix); },
+    () => {}, { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 });
 }
 
 function nfcNotice() {
@@ -438,6 +506,7 @@ async function runRegister(host, v, count) {
         await store.put("keys", k); db.keys.push(k);
         const be = { id: rid("e_"), keyId: k.id, vehicleId: v.id, action: "bookin", location: "", to: "", person: me() || "Someone", at: Date.now() };
         await store.put("events", be); db.events.push(be);
+        stampPos(k, "held"); ensureTracking();
         done++;
         $("#n").textContent = done;
         document.querySelectorAll(".dots span").forEach((s, i) => s.classList.toggle("on", i < done));
@@ -465,7 +534,8 @@ function viewActions() {
       ${tile("#/do/out", "📤", "Take from board", "Keys off a key board")}
       ${tile("#/do/check", "🔍", "Check a key", "Whose key is this?")}
       ${tile("#/do/handover", "🤝", "Hand over", "Give keys to someone")}
-      ${tile("#/keys", "🗺", "Where are the keys", "Every board, every person", "wide")}
+      ${tile("#/keys", "🗂", "Where are the keys", "Every board, every person")}
+      ${tile("#/map", "🗺", "Map", "See keys live on a map")}
     </div>`;
 }
 
@@ -571,7 +641,7 @@ function viewDo(mode) {
     }
     const ev = { id: rid("e_"), keyId: k.id, vehicleId: k.vehicleId, action: mode,
       location: mode === "handover" ? "" : choice, to: mode === "handover" ? choice : "", person: me() || "Someone", at: Date.now() };
-    try { await store.put("events", ev); db.events.push(ev); log("✓ " + describe(ev, `${esc(vlabel(v))} key ${k.n}`), "good"); }
+    try { await store.put("events", ev); db.events.push(ev); stampPos(k, mode === "in" ? "board" : "held"); ensureTracking(); log("✓ " + describe(ev, `${esc(vlabel(v))} key ${k.n}`), "good"); }
     catch (err) { log("Couldn't save: " + esc(err.message), "bad"); }
   };
 
@@ -587,12 +657,76 @@ function viewDo(mode) {
   };
 }
 
+/* ---------- map: where each person / board's keys are ---------- */
+let map = null, mapLayer = null, mapFitted = false, leafletLoading = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletLoading) return leafletLoading;
+  leafletLoading = new Promise((res, rej) => {
+    const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"; document.head.appendChild(css);
+    const js = document.createElement("script"); js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"; js.onload = res; js.onerror = rej; document.head.appendChild(js);
+  });
+  return leafletLoading;
+}
+function mapGroups() {
+  const groups = new Map();
+  for (const k of db.keys) {
+    const e = lastEvent(k.id), p = posFor(k.id);
+    if (!e || !p) continue;
+    const onBoard = e.action === "in";
+    const gid = onBoard ? "b:" + e.location : "p:" + holder(e);
+    if (!groups.has(gid)) groups.set(gid, { name: onBoard ? e.location : holder(e), onBoard, keys: [], pos: p });
+    const g = groups.get(gid); g.keys.push(k);
+    if (p.at > g.pos.at) g.pos = p;
+  }
+  return [...groups.values()];
+}
+const ago = t => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : when(t); };
+async function viewMap() {
+  setNav("map");
+  $("#app").innerHTML = `<h1>Map</h1><div id="map"></div><div id="maplist"></div>`;
+  map = null; mapFitted = false;
+  try { await loadLeaflet(); } catch { $("#map").outerHTML = `<div class="notice">Couldn't load the map.</div>`; return; }
+  if (currentView !== "map" || !$("#map")) return;
+  map = L.map("map", { zoomControl: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+  mapLayer = L.layerGroup().addTo(map);
+  map.setView([54.5, -3], 5);
+  updateMap();
+}
+function updateMap() {
+  if (!map || !$("#map")) return;
+  const groups = mapGroups();
+  mapLayer.clearLayers();
+  const pts = [];
+  for (const g of groups) {
+    const ll = [g.pos.lat, g.pos.lng]; pts.push(ll);
+    const colour = g.onBoard ? "#1a7f37" : "#d97706";
+    if (!g.onBoard && g.pos.acc) L.circle(ll, { radius: g.pos.acc, color: colour, weight: 1, fillOpacity: .08 }).addTo(mapLayer);
+    L.circleMarker(ll, { radius: 10, color: "#fff", weight: 3, fillColor: colour, fillOpacity: 1 })
+      .bindTooltip(`${g.onBoard ? "🗂" : "👤"} ${esc(g.name)} · ${g.keys.length}`, { permanent: true, direction: "top", offset: [0, -10], className: "mlabel" })
+      .bindPopup(`<b>${esc(g.name)}</b><br>${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join("<br>")}<br><span style="color:#888">${g.onBoard ? "Put on board" : "Updated"} ${ago(g.pos.at)}</span>`)
+      .addTo(mapLayer);
+  }
+  if (!mapFitted && pts.length) { map.fitBounds(pts, { padding: [40, 40], maxZoom: 17 }); mapFitted = true; }
+  $("#maplist").innerHTML = groups.length ? groups.sort((a, b) => a.onBoard - b.onBoard || a.name.localeCompare(b.name)).map(g => `
+    <div class="card" data-g="${esc(g.pos.lat + "," + g.pos.lng)}" style="cursor:pointer">
+      <div class="row"><b class="grow">${g.onBoard ? "🗂" : "👤"} ${esc(g.name)}</b>
+        <span class="pill ${g.onBoard ? "in" : "out"}">${g.onBoard ? "On board" : "Live"} · ${ago(g.pos.at)}</span></div>
+      <div class="muted" style="margin-top:4px">${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join(" · ")}</div>
+    </div>`).join("") : `<div class="empty">No key locations yet. They appear once someone books in, takes or hands over keys with location allowed.</div>`;
+  document.querySelectorAll("[data-g]").forEach(c => c.onclick = () => { const [a, b] = c.dataset.g.split(",").map(Number); map.setView([a, b], 17); window.scrollTo(0, 0); });
+}
+setInterval(() => { if (currentView === "map") updateMap(); }, 5000);   // keep "x s ago" fresh
+
 /* ---------- router ---------- */
-let ready = false;
+let ready = false, currentView = "";
 function render() {
   const h = location.hash || "#/";
   const m = h.match(/^#\/v\/([^/]+)/);
-  if (m) viewVehicle(m[1]);
+  currentView = h.startsWith("#/map") ? "map" : "";
+  if (currentView === "map") viewMap();
+  else if (m) viewVehicle(m[1]);
   else if (h.startsWith("#/do/")) viewDo(h.slice(5));
   else if (h.startsWith("#/book")) viewBook();
   else if (h.startsWith("#/keys") || h.startsWith("#/boards")) viewKeys();
@@ -617,6 +751,7 @@ async function start() {
   try { await load(); } catch (e) { $("#app").innerHTML = `<div class="notice">Couldn't load data: ${esc(e.message)}</div>`; return; }
   ready = true;
   goLive();
+  ensureTracking();
   route();
 }
 start();
