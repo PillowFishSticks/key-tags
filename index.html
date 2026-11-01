@@ -132,8 +132,6 @@ const SUPABASE_KEY = "sb_publishable_YzOjKCAZX2uTlFTvKb_NhQ_0tNxVvTi";
 <script>
 const NFC = "NDEFReader" in window;
 const PUBLIC_URL = "https://pillowfishsticks.github.io/key-tags/";
-/* what3words: paste your API key here (developer.what3words.com). Blank = plain map pins. */
-const W3W_KEY = "WJELKMW7";
 const LS = "keytags.";
 const sb = (SUPABASE_URL && SUPABASE_KEY && window.supabase) ? supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const rid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -1010,24 +1008,20 @@ function mapGroups() {
   }
   return [...groups.values()];
 }
-/* what3words lookups: only when someone views a location, cached per ~1 m spot, never on every ping */
-const w3wCache = new Map(), w3wPending = new Set();
-const w3wSpot = (lat, lng) => lat.toFixed(5) + "," + lng.toFixed(5);
-function w3w(lat, lng) {
-  if (!W3W_KEY) return null;
-  const k = w3wSpot(lat, lng);
-  if (w3wCache.has(k)) return w3wCache.get(k);
-  if (!w3wPending.has(k)) {
-    w3wPending.add(k);
-    fetch(`https://api.what3words.com/v3/convert-to-3wa?coordinates=${k}&language=en&key=${encodeURIComponent(W3W_KEY)}`)
-      .then(r => r.json())
-      .then(d => { w3wCache.set(k, d && d.words ? { words: d.words, near: d.nearestPlace || "", sq: d.square } : { error: (d && d.error && d.error.message) || "lookup failed" }); })
-      .catch(() => w3wCache.set(k, { error: "lookup failed" }))
-      .finally(() => { w3wPending.delete(k); if (currentView === "map") updateMap(); });
-  }
-  return null;
+/* Plus Codes (Open Location Code): free, no key, worked out on the phone. 11 digits = a ~3 m x 3.5 m square. */
+const OLC = "23456789CFGHJMPQRVWX";
+function plusCode(lat, lng) {
+  lat = Math.min(90 - 1e-9, Math.max(-90, lat));
+  lng = ((lng + 180) % 360 + 360) % 360 - 180;
+  let la = Math.floor((lat + 90) * 40000), lo = Math.floor((lng + 180) * 32000);   // 8000 per degree x grid 5 rows / 4 cols
+  const south = la / 40000 - 90, west = lo / 32000 - 180;
+  const grid = OLC[(la % 5) * 4 + (lo % 4)];
+  la = Math.floor(la / 5); lo = Math.floor(lo / 4);
+  let pairs = "";
+  for (let i = 0; i < 5; i++) { pairs = OLC[la % 20] + OLC[lo % 20] + pairs; la = Math.floor(la / 20); lo = Math.floor(lo / 20); }
+  return { code: pairs.slice(0, 8) + "+" + pairs.slice(8) + grid, sq: { southwest: { lat: south, lng: west }, northeast: { lat: south + 1 / 40000, lng: west + 1 / 32000 } } };
 }
-const w3wLink = a => `<a href="https://what3words.com/${esc(a.words)}" target="_blank" rel="noopener" style="color:#e11f26;font-weight:700;text-decoration:none">///${esc(a.words)}</a>`;
+const pcLink = a => `<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.code)}" target="_blank" rel="noopener" style="font-weight:700;font-family:ui-monospace,monospace;text-decoration:none">📍 ${esc(a.code)}</a>`;
 
 const ago = t => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : when(t); };
 async function viewMap() {
@@ -1053,14 +1047,14 @@ function updateMap() {
   for (const g of groups) {
     const ll = [g.pos.lat, g.pos.lng]; pts.push(ll);
     const colour = g.onBoard ? "#1a7f37" : "#d97706";
-    g.w3w = w3w(g.pos.lat, g.pos.lng);
-    if (g.w3w && g.w3w.sq) {
-      const sq = g.w3w.sq;   // the 3 m what3words square the key is in
+    g.pc = plusCode(g.pos.lat, g.pos.lng);
+    if (g.pc) {
+      const sq = g.pc.sq;   // the ~3 m square the key is in
       L.rectangle([[sq.southwest.lat, sq.southwest.lng], [sq.northeast.lat, sq.northeast.lng]], { color: colour, weight: 2, fillOpacity: .25 }).addTo(mapLayer);
     } else if (!g.onBoard && g.pos.acc) L.circle(ll, { radius: g.pos.acc, color: colour, weight: 1, fillOpacity: .08 }).addTo(mapLayer);
     L.circleMarker(ll, { radius: 10, color: "#fff", weight: 3, fillColor: colour, fillOpacity: 1 })
       .bindTooltip(`${g.onBoard ? "🗂" : "👤"} ${esc(g.name)} · ${g.keys.length}`, { permanent: true, direction: "top", offset: [0, -10], className: "mlabel" })
-      .bindPopup(`<b>${esc(g.name)}</b><br>${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join("<br>")}${g.w3w && g.w3w.words ? "<br>" + w3wLink(g.w3w) : ""}<br><span style="color:#888">${g.onBoard ? "Put on board" : "Updated"} ${ago(g.pos.at)}</span>`)
+      .bindPopup(`<b>${esc(g.name)}</b><br>${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join("<br>")}${g.pc ? "<br>" + pcLink(g.pc) : ""}<br><span style="color:#888">${g.onBoard ? "Put on board" : "Updated"} ${ago(g.pos.at)}</span>`)
       .addTo(mapLayer);
   }
   if (!mapFitted && pts.length) { map.fitBounds(pts, { padding: [40, 40], maxZoom: normReg(mapQuery) ? 19 : 17 }); mapFitted = true; }
@@ -1068,8 +1062,7 @@ function updateMap() {
     <div class="card" data-g="${esc(g.pos.lat + "," + g.pos.lng)}" style="cursor:pointer">
       <div class="row"><b class="grow">${g.onBoard ? "🗂" : "👤"} ${esc(g.name)}</b>
         <span class="pill ${g.onBoard ? "in" : "out"}">${g.onBoard ? "On board" : "Live"} · ${ago(g.pos.at)}</span></div>
-      ${g.w3w && g.w3w.words ? `<div style="margin-top:6px;font-size:17px">${w3wLink(g.w3w)}${g.w3w.near ? ` <span class="muted">near ${esc(g.w3w.near)}</span>` : ""}${g.pos.acc ? ` <span class="muted">· ±${g.pos.acc} m</span>` : ""}</div>`
-        : g.w3w && g.w3w.error ? `<div class="muted" style="margin-top:6px">what3words: ${esc(g.w3w.error)}</div>` : ""}
+      ${g.pc ? `<div style="margin-top:6px;font-size:17px">${pcLink(g.pc)}${g.pos.acc ? ` <span class="muted">· ±${g.pos.acc} m</span>` : ""}</div>` : ""}
       <div class="muted" style="margin-top:4px">${g.keys.map(k => `${esc(vehicle(k.vehicleId)?.vrm || "?")} key ${k.n}`).join(" · ")}</div>
     </div>`).join("") : normReg(mapQuery) ? `<div class="empty">No map location for "${esc(mapQuery)}"${matchingKeys(mapQuery).length ? `<br>${matchingKeys(mapQuery).map(k => `${esc(vehicle(k.vehicleId)?.vrm || "")} key ${k.n}: ${esc(whereText(k))}`).join("<br>")}` : ""}</div>`
     : `<div class="empty">No key locations yet. They appear once someone books in, takes or hands over keys with location allowed.</div>`;
