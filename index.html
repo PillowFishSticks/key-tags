@@ -68,6 +68,23 @@ a.vlink{color:inherit;text-decoration:none}
 .hist li{padding:8px 0;border-bottom:1px solid var(--line)}
 .hist ul{list-style:none;padding:0;margin:0}
 .empty{text-align:center;color:var(--muted);padding:28px 10px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 14px;display:flex;flex-direction:column;gap:4px;min-height:112px;color:var(--ink);text-decoration:none}
+.tile .ico{font-size:28px;line-height:1.2}
+.tile b{font-size:17px}
+.tile span{font-size:13px;color:var(--muted)}
+.tile.wide{grid-column:1/-1;min-height:auto;flex-direction:row;align-items:center;gap:12px}
+.tile.accent{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.tile.accent span{color:var(--accent-ink);opacity:.85}
+.step{display:flex;gap:10px;align-items:center;margin:20px 0 10px;font-weight:700;font-size:17px}
+.step i{font-style:normal;background:var(--accent);color:var(--accent-ink);border-radius:50%;width:26px;height:26px;display:grid;place-items:center;font-size:14px;flex:none}
+.step.dim{opacity:.4}
+.chips.big button{padding:14px 18px;font-size:17px;font-weight:600}
+.listen{display:flex;align-items:center;gap:12px;border:2px dashed var(--accent);border-radius:var(--radius);padding:16px;margin-top:6px;font-weight:600}
+.listen .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);flex:none;animation:pulse 1.2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 60%,transparent)}100%{box-shadow:0 0 0 14px transparent}}
+.result{text-align:center;padding:20px 14px}
+.result .plate{font-size:28px;padding:6px 16px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:15px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%}
 #toast.show{opacity:1}
 </style>
@@ -79,9 +96,9 @@ a.vlink{color:inherit;text-decoration:none}
     <button class="who" id="who"></button>
   </div>
   <nav>
-    <a href="#/boards" data-nav="boards">Boards</a>
-    <a href="#/" data-nav="home">Vehicles</a>
-    <a href="#/scan" data-nav="scan">Scan</a>
+    <a href="#/" data-nav="home">Home</a>
+    <a href="#/keys" data-nav="keys">Keys</a>
+    <a href="#/vehicles" data-nav="vehicles">Vehicles</a>
   </nav>
 </header>
 <main id="app"></main>
@@ -159,15 +176,16 @@ function buzz(ok) { try { navigator.vibrate && navigator.vibrate(ok ? 80 : [60, 
 function keyStatus(k) {
   const e = lastEvent(k.id);
   if (!e) return `<span class="pill new">Not scanned yet</span>`;
-  if (e.action === "handover") return `<span class="pill out">With ${esc(e.to)}</span>`;
-  return e.action === "out"
-    ? `<span class="pill out">With ${esc(e.person)}</span>`
-    : `<span class="pill in">In ${esc(e.location)}</span>`;
+  return e.action === "in"
+    ? `<span class="pill in">On ${esc(e.location)}</span>`
+    : `<span class="pill out">With ${esc(holder(e))}</span>`;
 }
 
+function holder(e) { return e.action === "handover" ? e.to : e.person; }
 function describe(e, what) {
+  if (e.action === "bookin") return `<b>${esc(e.person)}</b> booked in ${what}`;
   if (e.action === "handover") return `<b>${esc(e.person)}</b> handed ${what} to <b>${esc(e.to)}</b>`;
-  return `<b>${esc(e.person)}</b> ${e.action === "out" ? "took" : "put"} ${what} ${e.action === "out" ? "from" : "into"} ${esc(e.location)}`;
+  return `<b>${esc(e.person)}</b> ${e.action === "out" ? "took" : "put"} ${what} ${e.action === "out" ? "from" : "on"} ${esc(e.location)}`;
 }
 
 /* read a tag: its serial + the key id written in its URL (if any) */
@@ -252,8 +270,8 @@ function nfcNotice() {
   return NFC ? "" : `<div class="notice">Scanning needs <b>Chrome on an Android phone</b>. On this device you can still view vehicles, and tapping a registered tag opens its page.</div>`;
 }
 
-function viewHome() {
-  setNav("home");
+function viewVehicles() {
+  setNav("vehicles");
   $("#app").innerHTML = `
     ${nfcNotice()}
     <h1>Vehicles</h1>
@@ -284,7 +302,7 @@ function viewHome() {
   $("#addv").onsubmit = async ev => {
     ev.preventDefault();
     const v = { id: rid("v_"), name: $("#vname").value.trim(), vrm: $("#vrm").value.trim().toUpperCase(), at: Date.now() };
-    try { await store.put("vehicles", v); db.vehicles.push(v); viewHome(); toast(`${v.name} added`); }
+    try { await store.put("vehicles", v); db.vehicles.push(v); viewVehicles(); toast(`${v.name} added`); }
     catch (e) { toast("Couldn't save: " + e.message); }
   };
   document.querySelectorAll("[data-reg]").forEach(b => b.onclick = () => registerPanel($("#reg"), vehicle(b.dataset.reg)));
@@ -293,11 +311,11 @@ function viewHome() {
 function viewVehicle(vid) {
   setNav("");
   const v = vehicle(vid);
-  if (!v) { $("#app").innerHTML = `<div class="empty">This tag isn't linked to a vehicle any more.<br><br><a href="#/">Back to vehicles</a></div>`; return; }
+  if (!v) { $("#app").innerHTML = `<div class="empty">This tag isn't linked to a vehicle any more.<br><br><a href="#/vehicles">Back to vehicles</a></div>`; return; }
   const ks = keysFor(vid);
   const hist = db.events.filter(e => e.vehicleId === vid).sort((a, b) => b.at - a.at).slice(0, 50);
   $("#app").innerHTML = `
-    <a href="#/" class="muted" style="text-decoration:none">← Vehicles</a>
+    <a href="#/vehicles" class="muted" style="text-decoration:none">← Vehicles</a>
     <h1 style="margin-top:10px">${esc(v.name)}</h1>
     <div><span class="plate" style="font-size:22px;padding:4px 12px">${esc(v.vrm)}</span></div>
     <h2>Keys</h2>
@@ -323,41 +341,46 @@ function viewVehicle(vid) {
     for (const k of keysFor(vid)) await store.del("keys", k.id);
     await store.del("vehicles", vid);
     db.keys = db.keys.filter(k => k.vehicleId !== vid); db.vehicles = db.vehicles.filter(x => x.id !== vid);
-    location.hash = "#/";
+    location.hash = "#/vehicles";
   };
 }
 
-/* ---------- boards: where every key is right now ---------- */
-function viewBoards() {
-  setNav("boards");
-  const where = new Map();      // location name -> keys
-  const holding = new Map();    // person -> keys
-  const loose = [];
+/* ---------- where are the keys: by board / by person ---------- */
+let keysTab = "board";
+function viewKeys() {
+  setNav("keys");
+  const where = new Map(), holding = new Map();
+  for (const p of PEOPLE) holding.set(p, []);
   for (const k of db.keys) {
     const e = lastEvent(k.id);
-    if (!e) loose.push(k);
-    else if (e.action === "in") { if (!where.has(e.location)) where.set(e.location, []); where.get(e.location).push(k); }
-    else { const who = e.action === "handover" ? e.to : e.person; if (!holding.has(who)) holding.set(who, []); holding.get(who).push(k); }
+    if (!e) continue;
+    if (e.action === "in") { if (!where.has(e.location)) where.set(e.location, []); where.get(e.location).push(k); }
+    else { const h = holder(e); if (!holding.has(h)) holding.set(h, []); holding.get(h).push(k); }
   }
   const keyRow = k => {
     const v = vehicle(k.vehicleId);
-    return `<a class="vlink row" href="#/v/${k.vehicleId}" style="padding:8px 0;border-top:1px solid var(--line)">
+    return `<a class="vlink row" href="#/v/${k.vehicleId}" style="padding:10px 0;border-top:1px solid var(--line)">
       <span class="plate">${esc(v?.vrm || "?")}</span>
       <span class="grow">${esc(v?.name || "Unknown")}</span>
       <span class="muted">Key ${k.n}</span></a>`;
   };
-  const block = (title, keys, cls) => `<div class="card">
-      <div class="row" style="margin-bottom:4px"><b class="grow">${esc(title)}</b>
+  const sortKeys = ks => ks.sort((a, b) => (vehicle(a.vehicleId)?.name || "").localeCompare(vehicle(b.vehicleId)?.name || "") || a.n - b.n);
+  const block = (title, keys, cls, icon) => `<div class="card">
+      <div class="row" style="margin-bottom:4px"><b class="grow">${icon} ${esc(title)}</b>
         <span class="pill ${cls}">${keys.length} key${keys.length === 1 ? "" : "s"}</span></div>
-      ${keys.length ? keys.sort((a, b) => (vehicle(a.vehicleId)?.name || "").localeCompare(vehicle(b.vehicleId)?.name || "") || a.n - b.n).map(keyRow).join("") : `<div class="muted">Empty</div>`}
+      ${keys.length ? sortKeys(keys).map(keyRow).join("") : `<div class="muted">No keys</div>`}
     </div>`;
-  const boardNames = [...db.locations.map(l => l.name), ...[...where.keys()].filter(n => !db.locations.some(l => l.name === n))];
+  const boards = [...db.locations.map(l => l.name), ...[...where.keys()].filter(n => !db.locations.some(l => l.name === n))];
   $("#app").innerHTML = `
-    <h1>Boards</h1>
-    ${db.keys.length ? "" : `<div class="empty">No keys registered yet. Add a vehicle and register its keys first.</div>`}
-    ${boardNames.map(n => block(n, where.get(n) || [], "in")).join("")}
-    ${holding.size ? `<h2>Out with people</h2>${[...holding].map(([p, ks]) => block(p, ks, "out")).join("")}` : ""}
-    ${loose.length ? `<h2>Not on a board yet</h2>${block("Registered, never scanned", loose, "new")}` : ""}`;
+    <h1>Where are the keys</h1>
+    <div class="seg" style="margin-bottom:14px">
+      <button data-t="board" class="${keysTab === "board" ? "on" : ""}">On the boards</button>
+      <button data-t="person" class="${keysTab === "person" ? "on" : ""}">With people</button>
+    </div>
+    ${keysTab === "board"
+      ? boards.map(n => block(n, where.get(n) || [], "in", "🗂")).join("")
+      : [...holding].map(([p, ks]) => block(p === me() ? p + " (you)" : p, ks, "out", "👤")).join("")}`;
+  document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { keysTab = b.dataset.t; viewKeys(); });
 }
 
 /* ---------- register keys ---------- */
@@ -413,6 +436,8 @@ async function runRegister(host, v, count) {
         const k = { id: rid("k_"), serial: t.serial, vehicleId: v.id, n: (keysFor(v.id).at(-1)?.n || 0) + 1, at: Date.now() };
         await reader.write({ records: [{ recordType: "url", data: tagUrl(v.id, k.id) }] }, { signal: ctrl.signal });
         await store.put("keys", k); db.keys.push(k);
+        const be = { id: rid("e_"), keyId: k.id, vehicleId: v.id, action: "bookin", location: "", to: "", person: me() || "Someone", at: Date.now() };
+        await store.put("events", be); db.events.push(be);
         done++;
         $("#n").textContent = done;
         document.querySelectorAll(".dots span").forEach((s, i) => s.classList.toggle("on", i < done));
@@ -426,88 +451,153 @@ async function runRegister(host, v, count) {
   };
 }
 
-/* ---------- scan in / out ---------- */
-let scanMode = "out", scanLoc = null, handTo = null;
-function viewScan() {
-  setNav("scan");
-  stopSession();
-  scanLoc = scanLoc && db.locations.find(l => l.name === scanLoc) ? scanLoc : db.locations[0]?.name;
+/* ---------- home: one big button per job ---------- */
+const backHome = `<a href="#/" class="muted" style="text-decoration:none">← Home</a>`;
+function viewActions() {
+  setNav("home");
+  const tile = (href, ico, title, sub, cls = "") => `<a class="tile ${cls}" href="${href}"><div class="ico">${ico}</div><div><b>${title}</b><br><span>${sub}</span></div></a>`;
   $("#app").innerHTML = `
     ${nfcNotice()}
-    <h1>Scan keys in / out</h1>
-    <div class="seg" id="mode">
-      <button data-m="out" class="${scanMode === "out" ? "on" : ""}">Taking out</button>
-      <button data-m="in" class="${scanMode === "in" ? "on" : ""}">Putting back</button>
-      <button data-m="handover" class="${scanMode === "handover" ? "on" : ""}">Hand over</button>
-    </div>
-    ${scanMode === "handover" ? `
-    <h2>Hand to</h2>
-    <div class="chips">${PEOPLE.filter(p => p !== me()).map(p => `<button data-to="${p}" class="${p === handTo ? "on" : ""}">${p}</button>`).join("")}</div>` : `
-    <h2 id="loclabel">${scanMode === "out" ? "From" : "Into"}</h2>
-    <div class="chips" id="locs">${db.locations.map(l => `<button data-l="${esc(l.name)}" class="${l.name === scanLoc ? "on" : ""}">${esc(l.name)}</button>`).join("")}
-      <button id="addloc">+ Add</button></div>`}
-    <h2>Who</h2>
-    ${sb ? `<div class="card" style="margin:0">Scanning as <b>${esc(me())}</b></div><input id="me" type="hidden" value="${esc(me())}">`
-         : `<input id="me" placeholder="Your name" value="${esc(me())}">`}
-    <div style="margin-top:18px">${NFC ? `<button class="primary big" id="scan">Start scanning</button>` : ""}</div>
-    <div id="scanpanel"></div>`;
-  document.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { scanMode = b.dataset.m; viewScan(); });
-  document.querySelectorAll("[data-l]").forEach(b => b.onclick = () => { scanLoc = b.dataset.l; viewScan(); });
-  document.querySelectorAll("[data-to]").forEach(b => b.onclick = () => { handTo = b.dataset.to; viewScan(); });
-  if ($("#addloc")) $("#addloc").onclick = async () => {
-    const n = (prompt("New location name, e.g. Key place 5") || "").trim(); if (!n) return;
-    const l = { id: rid("l_"), name: n, order: db.locations.length }; await store.put("locations", l); db.locations.push(l); scanLoc = n; viewScan();
-  };
-  if ($("#me").type !== "hidden") $("#me").onchange = () => { localStorage[LS + "me"] = $("#me").value.trim(); renderWho(); };
-  if (NFC) $("#scan").onclick = runScan;
+    <h1>Hi ${esc(me() || "there")} 👋</h1>
+    <div class="tiles">
+      ${tile("#/book", "🚗", "Book in", "New vehicle, register its keys", "wide accent")}
+      ${tile("#/do/in", "📥", "Put on board", "Keys onto a key board")}
+      ${tile("#/do/out", "📤", "Take from board", "Keys off a key board")}
+      ${tile("#/do/check", "🔍", "Check a key", "Whose key is this?")}
+      ${tile("#/do/handover", "🤝", "Hand over", "Give keys to someone")}
+      ${tile("#/keys", "🗺", "Where are the keys", "Every board, every person", "wide")}
+    </div>`;
 }
 
-async function runScan() {
-  const person = $("#me").value.trim();
-  if (!person) { toast("Add your name first"); $("#me").focus(); return; }
-  localStorage[LS + "me"] = person; renderWho();
-  const mode = scanMode;
-  if (mode === "handover" && (!handTo || handTo === person)) { toast("Pick who you're handing to"); return; }
-  if (mode !== "handover" && !scanLoc) { toast("Pick a location"); return; }
-  const loc = mode === "handover" ? "" : scanLoc, to = mode === "handover" ? handTo : "";
-  const recent = new Map();
-  $("#scan").style.display = "none";
-  $("#scanpanel").innerHTML = `<div class="panel">
-    <div class="row"><div class="grow"><b>${mode === "handover" ? "Handing to " + esc(to) : (mode === "out" ? "Taking out from " : "Putting back into ") + esc(loc)}</b><br><span class="muted">Tap key tags one after another</span></div>
-    <button id="stopscan">Stop</button></div><ul class="log" id="log"></ul></div>`;
-  const log = (msg, cls) => { $("#log").insertAdjacentHTML("afterbegin", `<li class="${cls}">${esc(msg)}</li>`); buzz(cls === "good"); };
-  $("#stopscan").onclick = () => { stopSession(); viewScan(); };
+/* ---------- book in: vehicle details, then tap its keys ---------- */
+function viewBook() {
+  setNav("home");
+  $("#app").innerHTML = `${backHome}
+    <h1 style="margin-top:10px">Book in a vehicle</h1>
+    ${nfcNotice()}
+    <div class="step"><i>1</i>Vehicle details</div>
+    <form class="card" id="bk">
+      <input id="vrm" placeholder="Reg, e.g. AB12 CDE" required autocomplete="off" style="text-transform:uppercase;font-size:20px;font-weight:700">
+      <input id="vname" placeholder="Name (optional), e.g. Vehicle ${db.vehicles.length + 1}" style="margin-top:8px">
+      <button class="primary big" style="margin-top:12px">Next</button>
+    </form>
+    <div class="step dim" id="s2"><i>2</i>Register its keys</div>
+    <div id="reg"></div>`;
+  $("#bk").onsubmit = async ev => {
+    ev.preventDefault();
+    const v = { id: rid("v_"), name: $("#vname").value.trim() || `Vehicle ${db.vehicles.length + 1}`, vrm: $("#vrm").value.trim().toUpperCase(), at: Date.now() };
+    try { await store.put("vehicles", v); db.vehicles.push(v); }
+    catch (e) { toast("Couldn't save: " + e.message); return; }
+    $("#bk").outerHTML = `<div class="card row"><span class="plate" style="font-size:18px">${esc(v.vrm)}</span><b class="grow">${esc(v.name)}</b><span class="pill in">Saved</span></div>`;
+    $("#s2").classList.remove("dim");
+    if (NFC) registerPanel($("#reg"), v);
+    else $("#reg").innerHTML = `<div class="card muted">Use Chrome on an Android phone to register the key stickers.</div>`;
+  };
+}
 
+/* ---------- put on board / take from board / hand over / check ---------- */
+async function startReader(onTag) {
+  stopSession();
   const ctrl = new AbortController(); session = ctrl;
   const reader = new NDEFReader();
-  try { await reader.scan({ signal: ctrl.signal }); }
-  catch (e) { log("Couldn't start NFC: " + e.message + " — is NFC switched on?", "bad"); return; }
-  reader.onreadingerror = () => log("Couldn't read that tag — try again", "bad");
-  reader.onreading = async e => {
-    const t = readTag(e);
-    const tagKey = t.serial || t.url;
-    if (tagKey && Date.now() - (recent.get(tagKey) || 0) < 3000) return;
-    recent.set(tagKey, Date.now());
-    if (!t.key) { log("This tag isn't registered to a vehicle", "bad"); return; }
-    const v = vehicle(t.key.vehicleId);
-    const ev = { id: rid("e_"), keyId: t.key.id, vehicleId: t.key.vehicleId, action: mode, location: loc, to, person, at: Date.now() };
-    try {
-      await store.put("events", ev); db.events.push(ev);
-      const d = document.createElement("div"); d.innerHTML = describe(ev, `${vlabel(v)} key ${t.key.n}`);
-      log(d.textContent, "good");
-    } catch (err) { log("Couldn't save: " + err.message, "bad"); }
+  await reader.scan({ signal: ctrl.signal });
+  const recent = new Map();
+  reader.onreadingerror = () => onTag(null);
+  reader.onreading = e => {
+    const t = readTag(e), tk = t.serial || t.url;
+    if (tk && Date.now() - (recent.get(tk) || 0) < 3000) return;   // same tag bouncing
+    recent.set(tk, Date.now());
+    onTag(t);
+  };
+}
+
+const JOBS = {
+  in:       { title: "Put keys on a board",    ask: "Which board?",               tap: "Tap each key on your phone" },
+  out:      { title: "Take keys from a board", ask: "Which board?",               tap: "Tap each key on your phone" },
+  handover: { title: "Hand keys over",         ask: "Who are you giving them to?", tap: "Tap each key on your phone" },
+  check:    { title: "Check a key",            ask: "",                            tap: "Tap a key on your phone" },
+};
+
+function viewDo(mode) {
+  const job = JOBS[mode];
+  if (!job) { viewActions(); return; }
+  setNav("home");
+  let choice = null;
+  const opts = mode === "handover" ? PEOPLE.filter(p => p !== me()) : db.locations.map(l => l.name);
+  $("#app").innerHTML = `${backHome}
+    <h1 style="margin-top:10px">${job.title}</h1>
+    ${nfcNotice()}
+    ${mode === "check" ? `
+      <button class="primary big" id="startcheck" style="margin-top:6px">Start</button>` : `
+      <div class="step"><i>1</i>${job.ask}</div>
+      <div class="chips big">${opts.map(o => `<button data-c="${esc(o)}">${esc(o)}</button>`).join("")}
+        ${mode === "handover" ? "" : `<button id="addloc">+ Add board</button>`}</div>
+      <div class="step dim" id="s2"><i>2</i>${job.tap}</div>`}
+    <div id="live"></div>
+    <ul class="log" id="log"></ul>
+    <button class="big" id="done" style="display:none;margin-top:10px">Done</button>`;
+
+  const log = (html, cls) => { $("#log").insertAdjacentHTML("afterbegin", `<li class="${cls}">${html}</li>`); buzz(cls === "good"); };
+  $("#done").onclick = () => { stopSession(); location.hash = "#/"; };
+
+  const go = async () => {
+    if (!NFC) { toast("Needs Chrome on an Android phone"); return; }
+    try { await startReader(t => handle(t)); }
+    catch (e) { log("Couldn't start NFC: " + esc(e.message) + " — is NFC switched on?", "bad"); return; }
+    if ($("#s2")) $("#s2").classList.remove("dim");
+    if ($("#startcheck")) $("#startcheck").style.display = "none";
+    $("#live").innerHTML = `<div class="listen"><div class="dot"></div><div>Ready — ${job.tap.toLowerCase()}${choice ? ` <span class="muted">(${mode === "handover" ? "to" : ""} ${esc(choice)})</span>` : ""}</div></div>`;
+    $("#done").style.display = "";
+  };
+
+  const handle = async t => {
+    if (!t) { log("Couldn't read that — try again", "bad"); return; }
+    if (!t.key) { log("That tag isn't registered to a vehicle", "bad"); return; }
+    const k = t.key, v = vehicle(k.vehicleId);
+    if (mode === "check") {
+      const hist = db.events.filter(e => e.keyId === k.id).sort((a, b) => b.at - a.at).slice(0, 3);
+      $("#log").innerHTML = "";
+      $("#live").innerHTML = `<div class="card result">
+          <div class="plate">${esc(v?.vrm || "?")}</div>
+          <div style="font-size:20px;font-weight:700;margin-top:10px">${esc(v?.name || "Unknown vehicle")}</div>
+          <div class="muted">Key ${k.n} of ${keysFor(k.vehicleId).length}</div>
+          <div style="margin:12px 0">${keyStatus(k)}</div>
+          ${hist.length ? `<div class="muted" style="font-size:14px">${hist.map(e => describe(e, "it") + " · " + when(e.at)).join("<br>")}</div>` : ""}
+          <a href="#/v/${k.vehicleId}" style="display:block;margin-top:14px"><button class="primary big">Open vehicle</button></a>
+          <div class="muted" style="margin-top:10px">Tap another key to check it</div>
+        </div>`;
+      buzz(true);
+      return;
+    }
+    const ev = { id: rid("e_"), keyId: k.id, vehicleId: k.vehicleId, action: mode,
+      location: mode === "handover" ? "" : choice, to: mode === "handover" ? choice : "", person: me() || "Someone", at: Date.now() };
+    try { await store.put("events", ev); db.events.push(ev); log("✓ " + describe(ev, `${esc(vlabel(v))} key ${k.n}`), "good"); }
+    catch (err) { log("Couldn't save: " + esc(err.message), "bad"); }
+  };
+
+  document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => {
+    choice = b.dataset.c;
+    document.querySelectorAll("[data-c]").forEach(x => x.classList.toggle("on", x === b));
+    go();
+  });
+  if ($("#startcheck")) $("#startcheck").onclick = go;
+  if ($("#addloc")) $("#addloc").onclick = async () => {
+    const n = (prompt("New board name, e.g. Key board 4") || "").trim(); if (!n) return;
+    const l = { id: rid("l_"), name: n, order: db.locations.length }; await store.put("locations", l); db.locations.push(l); viewDo(mode);
   };
 }
 
 /* ---------- router ---------- */
 let ready = false;
 function render() {
-  const h = location.hash;
+  const h = location.hash || "#/";
   const m = h.match(/^#\/v\/([^/]+)/);
   if (m) viewVehicle(m[1]);
-  else if (h.startsWith("#/scan")) viewScan();
-  else if (h.startsWith("#/boards")) viewBoards();
-  else viewHome();
+  else if (h.startsWith("#/do/")) viewDo(h.slice(5));
+  else if (h.startsWith("#/book")) viewBook();
+  else if (h.startsWith("#/keys") || h.startsWith("#/boards")) viewKeys();
+  else if (h.startsWith("#/vehicles")) viewVehicles();
+  else viewActions();
 }
 function route() { stopSession(); if (!ready) return; render(); window.scrollTo(0, 0); }
 window.addEventListener("hashchange", async () => { if (!ready) return; await load().catch(() => {}); route(); });
