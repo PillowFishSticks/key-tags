@@ -287,8 +287,32 @@ async function answerOffer(id, yes) {
 }
 
 /* one active NFC session at a time */
-let session = null;
-function stopSession() { if (session) { session.abort(); session = null; } }
+let session = null, idleCtrl = null;
+function stopIdle() { if (idleCtrl) { idleCtrl.abort(); idleCtrl = null; } }
+function stopSession() { if (session) { session.abort(); session = null; } stopIdle(); }
+
+/* once NFC has been allowed, pages can start listening without a Start tap */
+async function nfcAllowed() {
+  if (!NFC) return false;
+  try { return (await navigator.permissions.query({ name: "nfc" })).state === "granted"; } catch { return false; }
+}
+/* on ordinary pages: tapping a key opens its vehicle, tapping a peg shows the peg (inside the app, no new tab) */
+async function startIdle() {
+  stopIdle();
+  if (!(await nfcAllowed())) return;
+  const ctrl = new AbortController(); idleCtrl = ctrl;
+  const reader = new NDEFReader();
+  try { await reader.scan({ signal: ctrl.signal }); } catch { if (idleCtrl === ctrl) idleCtrl = null; return; }
+  let last = 0;
+  reader.onreading = e => {
+    if (idleCtrl !== ctrl || Date.now() - last < 2500) return;
+    last = Date.now();
+    const t = readTag(e);
+    if (t.key) { buzz(true); location.hash = `#/v/${t.key.vehicleId}/k/${t.key.id}`; }
+    else if (t.peg) { buzz(true); location.hash = `#/peg/${t.peg.id}`; }
+    else toast("That sticker isn't registered");
+  };
+}
 
 /* ---------- views ---------- */
 function setNav(name) { document.querySelectorAll("[data-nav]").forEach(a => a.classList.toggle("on", a.dataset.nav === name)); }
@@ -814,6 +838,7 @@ function viewDo(mode) {
   };
   showWaiting();
   $("#done").onclick = () => { stopSession(); keepAwake(false); location.hash = "#/"; };
+  nfcAllowed().then(ok => { if (ok && location.hash.startsWith("#/do/" + mode) && !session) go(); });
 
   const go = async () => {
     if (!NFC) { toast("Needs Chrome on an Android phone"); return; }
@@ -879,6 +904,7 @@ function viewDo(mode) {
       const k = t.key, who = keyHolder(k), place = keyPlace(k);
 
       if (mode === "handover") {
+        if (!choice) { log("Pick who you're handing to first", "warn"); return; }
         if (who !== me()) {
           log(place ? `${kname(k)} is on ${esc(place.board)}${place.peg ? " · peg " + place.peg : ""} — take it from the board first`
                     : who ? `${kname(k)} is with ${esc(who)}, not you — only they can hand it over` : `${kname(k)} hasn't been booked out to you`, "bad");
@@ -901,12 +927,13 @@ function viewDo(mode) {
   document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => {
     choice = b.dataset.c;
     document.querySelectorAll("[data-c]").forEach(x => x.classList.toggle("on", x === b));
-    go();
+    if ($("#s2")) $("#s2").classList.remove("dim");
+    if (session) { if ($("#startcheck")) $("#startcheck").style.display = "none"; ready(); } else go();
   });
   document.querySelectorAll("[data-b]").forEach(b => b.onclick = () => {
     boardFallback = b.dataset.b;
     document.querySelectorAll("[data-b]").forEach(x => x.classList.toggle("on", x === b));
-    go();
+    if (!session) go();
   });
   if ($("#startcheck")) $("#startcheck").onclick = go;
 
@@ -1123,7 +1150,11 @@ function render() {
   else if (h.startsWith("#/vehicles")) viewVehicles();
   else viewActions();
 }
-function route() { stopSession(); if (!ready) return; render(); window.scrollTo(0, 0); }
+const ownsNfc = h => /^#\/(do|pegs|book)\//.test(h) || h.startsWith("#/book");   // these pages run their own scanning
+function route() {
+  stopSession(); if (!ready) return; render(); window.scrollTo(0, 0);
+  if (!ownsNfc(location.hash)) startIdle();
+}
 window.addEventListener("hashchange", async () => { if (!ready) return; await load().catch(() => {}); route(); });
 window.addEventListener("pageshow", e => { if (e.persisted && ready) load().then(route); });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && ready) refresh(); });
