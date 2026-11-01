@@ -287,7 +287,7 @@ async function answerOffer(id, yes) {
 }
 
 /* one active NFC session at a time */
-let session = null, idleCtrl = null, pegWaiter = null;
+let session = null, idleCtrl = null, pegWaiter = null, tapHandler = null;
 function stopIdle() { if (idleCtrl) { idleCtrl.abort(); idleCtrl = null; } }
 function stopSession() { if (session) { session.abort(); session = null; } stopIdle(); }
 
@@ -309,6 +309,7 @@ async function startIdle(force) {
     last = Date.now();
     const t = readTag(e);
     if (t.peg && pegWaiter) { buzz(true); pegWaiter(t.peg).catch(err => toast("Couldn't save: " + err.message)); return; }
+    if (tapHandler) { buzz(true); tapHandler(t); return; }
     if (t.key) { buzz(true); location.hash = `#/v/${t.key.vehicleId}/k/${t.key.id}`; }
     else if (t.peg) { buzz(true); location.hash = `#/peg/${t.peg.id}`; }
     else toast("That sticker isn't registered");
@@ -379,10 +380,12 @@ async function refresh() {
   renderOffers();
   // don't redraw mid-scan or while someone is typing; the data is still updated underneath
   const typing = document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName);
-  if (session || typing || document.querySelector("#reg .panel")) return;
+  if (session || typing || pegWaiter || document.querySelector("#reg .panel")) return;
   ensureTracking();
   if (currentView === "map") { updateMap(); return; }   // updates in place, search box keeps focus
+  const keep = homeShown;
   const y = window.scrollY; render(); window.scrollTo(0, y);
+  if (keep && (location.hash === "" || location.hash === "#/")) { const kk = db.keys.find(x => x.id === keep); if (kk) showKeyExternal(kk); }
 }
 
 /* ---------- live location: one row per key, overwritten every 10 s ---------- */
@@ -501,10 +504,11 @@ function keyActions(k) {
       <div class="qa" id="qa_${k.id}"></div>
       <div class="row" style="margin-top:8px;gap:8px">${PEOPLE.filter(p => p !== me()).map(p =>
         `<button class="grow" data-act="give" data-to="${p}" data-k="${k.id}">Give to ${p}</button>`).join("")}</div>
-      ${offer ? `<div class="muted" style="margin-top:6px">Waiting for ${esc(offer.to)} to accept</div>` : ""}`;
+      ${offer ? `<div class="muted" style="margin-top:6px">Waiting for ${esc(offer.to)} to accept</div>` : ""}` + unregLink(k);
   const label = place ? "Take it" : who ? `Take from ${esc(who)}` : "Take it";
-  return `<button class="primary big" style="margin-top:10px" data-act="take" data-k="${k.id}">${label}</button>`;
+  return `<button class="primary big" style="margin-top:10px" data-act="take" data-k="${k.id}">${label}</button>` + unregLink(k);
 }
+const unregLink = k => `<button class="danger" style="margin-top:6px;font-size:13px;color:var(--muted)" data-act="unreg" data-k="${k.id}">Unregister sticker</button>`;
 function viewVehicle(vid) {
   setNav("");
   const scanned = (location.hash.match(/\/k\/([^/?#]+)/) || [])[1];
@@ -532,51 +536,7 @@ function viewVehicle(vid) {
     <button class="danger" id="delv" style="margin-top:24px">Delete vehicle</button>`;
   if (NFC) $("#regbtn").onclick = () => registerPanel($("#reg"), v);
   const again = () => { const y = window.scrollY; viewVehicle(vid); window.scrollTo(0, y); };
-  document.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
-    const k = db.keys.find(x => x.id === b.dataset.k); if (!k) return;
-    const act = b.dataset.act;
-    try {
-      if (act === "take") {
-        const who = keyHolder(k);
-        const ev = who && who !== me()
-          ? await saveMove(k, "handover", { person: who, to: me(), taken: true })
-          : await saveMove(k, "out", { person: me() });
-        toast("✓ " + describe(ev, "key " + k.n).replace(/<[^>]+>/g, ""));
-        again(); return;
-      }
-      const box = $("#qa_" + k.id);
-      if (act === "puton") {
-        const manual = () => {
-          box.innerHTML = `<div class="muted" style="margin-top:10px">Which board?</div>
-            <div class="chips" style="margin-top:6px">${db.locations.map(l => `<button data-board="${l.id}">${esc(l.name)}</button>`).join("")}</div>`;
-          box.querySelectorAll("[data-board]").forEach(c => c.onclick = async () => {
-            const l = boardById(c.dataset.board); pegWaiter = null;
-            await saveMove(k, "in", { location: l.name, peg: null, person: me() });
-            toast(`✓ Key ${k.n} on ${l.name}`); again();
-          });
-        };
-        if (!NFC) { manual(); return; }
-        pegWaiter = async peg => {
-          pegWaiter = null;
-          const l = boardById(peg.board);
-          await saveMove(k, "in", { location: l ? l.name : "Board", peg: peg.n, person: me() });
-          toast(`✓ Key ${k.n} on ${pegLabel(peg)}`); again();
-        };
-        if (!idleCtrl) await startIdle(true);
-        b.style.display = "none";
-        box.innerHTML = `<div class="listen" style="margin-top:10px"><div class="dot"></div><div class="grow">Now tap the peg you're hanging it on</div>
-            <button class="danger" id="cancelpeg" style="color:var(--muted)">Cancel</button></div>
-          <a href="javascript:void 0" id="nopeg" class="muted" style="display:block;margin-top:8px;font-size:14px">No sticker on the peg?</a>`;
-        $("#cancelpeg").onclick = () => { pegWaiter = null; again(); };
-        $("#nopeg").onclick = manual;
-      }
-      if (act === "give") {
-        const o = { id: "o_" + k.id, keyId: k.id, from: me(), to: b.dataset.to, at: Date.now() };
-        await store.put("offers", o); db.offers = db.offers.filter(x => x.id !== o.id).concat(o);
-        toast(`Sent — ${o.to} gets an Accept button`); again();
-      }
-    } catch (err) { toast("Couldn't save: " + err.message); }
-  });
+  bindKeyActions(document, again);
   $("#delv").onclick = async () => {
     if (!confirm(`Delete ${v.name} and release its keys?`)) return;
     for (const k of keysFor(vid)) await store.del("keys", k.id);
@@ -733,26 +693,141 @@ async function runRegister(host, v, count) {
   };
 }
 
+function bindKeyActions(scope, again) {
+  scope.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
+    const k = db.keys.find(x => x.id === b.dataset.k); if (!k) return;
+    const act = b.dataset.act;
+    try {
+      if (act === "take") {
+        const who = keyHolder(k);
+        const ev = who && who !== me()
+          ? await saveMove(k, "handover", { person: who, to: me(), taken: true })
+          : await saveMove(k, "out", { person: me() });
+        toast("✓ " + describe(ev, "key " + k.n).replace(/<[^>]+>/g, ""));
+        again(); return;
+      }
+      const box = scope.querySelector("#qa_" + k.id);
+      if (act === "puton") {
+        const manual = () => {
+          box.innerHTML = `<div class="muted" style="margin-top:10px">Which board?</div>
+            <div class="chips" style="margin-top:6px">${db.locations.map(l => `<button data-board="${l.id}">${esc(l.name)}</button>`).join("")}</div>`;
+          box.querySelectorAll("[data-board]").forEach(c => c.onclick = async () => {
+            const l = boardById(c.dataset.board); pegWaiter = null;
+            await saveMove(k, "in", { location: l.name, peg: null, person: me() });
+            toast(`✓ Key ${k.n} on ${l.name}`); again();
+          });
+        };
+        if (!NFC) { manual(); return; }
+        pegWaiter = async peg => {
+          pegWaiter = null;
+          const l = boardById(peg.board);
+          await saveMove(k, "in", { location: l ? l.name : "Board", peg: peg.n, person: me() });
+          toast(`✓ Key ${k.n} on ${pegLabel(peg)}`); again();
+        };
+        if (!idleCtrl) await startIdle(true);
+        b.style.display = "none";
+        box.innerHTML = `<div class="listen" style="margin-top:10px"><div class="dot"></div><div class="grow">Now tap the peg you're hanging it on</div>
+            <button class="danger" id="cancelpeg" style="color:var(--muted)">Cancel</button></div>
+          <a href="javascript:void 0" id="nopeg" class="muted" style="display:block;margin-top:8px;font-size:14px">No sticker on the peg?</a>`;
+        $("#cancelpeg").onclick = () => { pegWaiter = null; again(); };
+        $("#nopeg").onclick = manual;
+      }
+      if (act === "unreg") {
+        b.outerHTML = `<div class="row" style="margin-top:8px;gap:8px"><button class="grow" style="background:var(--bad);color:#fff" data-yes="${k.id}">Yes, unregister sticker</button><button data-no="1">Cancel</button></div>`;
+        scope.querySelector("[data-no]").onclick = () => again();
+        scope.querySelector("[data-yes]").onclick = async () => {
+          try {
+            await store.del("keys", k.id); db.keys = db.keys.filter(x => x.id !== k.id);
+            await store.del("pos", "pos_" + k.id).catch(() => {}); db.pos = db.pos.filter(x => x.id !== "pos_" + k.id);
+            await store.del("offers", "o_" + k.id).catch(() => {}); db.offers = db.offers.filter(x => x.id !== "o_" + k.id);
+          } catch (err) { toast("Couldn't unregister: " + err.message); return; }
+          ensureTracking(); toast("✓ Sticker unregistered — it can be used again"); again(true);
+        };
+        return;
+      }
+      if (act === "give") {
+        const o = { id: "o_" + k.id, keyId: k.id, from: me(), to: b.dataset.to, at: Date.now() };
+        await store.put("offers", o); db.offers = db.offers.filter(x => x.id !== o.id).concat(o);
+        toast(`Sent — ${o.to} gets an Accept button`); again();
+      }
+    } catch (err) { toast("Couldn't save: " + err.message); }
+  });
+}
+
 /* ---------- home: one big button per job ---------- */
 const backHome = `<a href="#/" class="muted" style="text-decoration:none">← Home</a>`;
 function viewActions() {
   setNav("home");
-  const tile = (href, ico, title, sub, cls = "") => `<a class="tile ${cls}" href="${href}"><div class="ico">${ico}</div><div><b>${title}</b><br><span>${sub}</span></div></a>`;
+  const mineNow = db.keys.filter(k => keyHolder(k) === me());
   $("#app").innerHTML = `
     ${nfcNotice()}
-    <h1>Hi ${esc(me() || "there")} 👋</h1>
-    <div class="tiles">
-      ${tile("#/book", "🚗", "Book in", "New vehicle, register its keys", "wide accent")}
-      ${tile("#/do/station", "📟", "Board station", "Phone at the board — tap key, tap peg", "wide")}
-      ${tile("#/do/in", "📥", "Put on board", "Tap key, then peg")}
-      ${tile("#/do/out", "📤", "Take from board", "Tap the key")}
-      ${tile("#/do/check", "🔍", "Check", "Whose key? What's on this peg?")}
-      ${tile("#/do/handover", "🤝", "Hand over", "They accept on their phone")}
-      ${tile("#/keys", "🗂", "Where are the keys", "Every board, every person")}
-      ${tile("#/map", "🗺", "Map", "See keys live on a map")}
-      ${tile("#/do/unregister", "🧹", "Unregister", "Free up a sticker to reuse", "wide")}
+    <div id="scanbox"></div>
+    <div id="tapped"></div>
+    <input id="hq" placeholder="🔍 Find a reg" autocomplete="off" style="font-size:18px;text-transform:uppercase;margin-top:14px">
+    <div id="hresults"></div>
+    <a href="#/book" style="display:block;margin-top:12px"><button class="big">🚗 Book in a vehicle</button></a>
+    ${mineNow.length ? `<h2>Keys you have</h2>${mineNow.map(k => { const v = vehicle(k.vehicleId);
+      return `<a class="vlink card row" href="#/v/${k.vehicleId}/k/${k.id}"><span class="plate">${esc(v?.vrm || "?")}</span><span class="grow">${esc(v?.name || "")}</span><span class="muted">Key ${k.n}</span></a>`; }).join("")}` : ""}`;
+
+  const scanbox = async () => {
+    if (!NFC) { $("#scanbox").innerHTML = ""; return; }
+    const on = !!idleCtrl;
+    $("#scanbox").innerHTML = on
+      ? `<div class="listen" style="font-size:18px"><div class="dot"></div><div>Tap a key or a peg</div></div>`
+      : `<button class="primary big" id="scanon" style="font-size:18px">📡 Tap to start scanning</button>`;
+    if (!on) $("#scanon").onclick = async () => { await startIdle(true); scanbox(); };
+  };
+  // idle listening may still be starting up
+  scanbox(); setTimeout(scanbox, 600);
+
+  const keyCard = k => {
+    const v = vehicle(k.vehicleId);
+    return `<div class="card" style="border:2px solid var(--accent)">
+      <div class="row"><span class="plate" style="font-size:20px">${esc(v?.vrm || "?")}</span>
+        <div class="grow"><b>${esc(v?.name || "")}</b> · key ${k.n}</div>
+        <a href="#/v/${k.vehicleId}" style="font-size:14px">Vehicle</a></div>
+      <div style="margin-top:8px">${keyStatus(k)}</div>
+      ${keyActions(k)}
     </div>`;
+  };
+  let shown = null;
+  const showKey = (k, keep) => {
+    shown = k ? k.id : null; homeShown = shown;
+    if (!k) { $("#tapped").innerHTML = ""; return; }
+    $("#tapped").innerHTML = keyCard(k);
+    bindKeyActions($("#tapped"), gone => { if (!$("#tapped")) return; const kk = !gone && db.keys.find(x => x.id === shown); kk ? showKey(kk) : showKey(null); renderMine(); });
+  };
+  const renderMine = () => { if (location.hash === "" || location.hash === "#/") { const y = window.scrollY; const keep = shown; viewActions(); if (keep) { const kk = db.keys.find(x => x.id === keep); if (kk) showKeyExternal(kk); } window.scrollTo(0, y); } };
+  showKeyExternal = showKey;
+  const showPeg = peg => {
+    const l = boardById(peg.board), k = l && keyOnPeg(l.name, peg.n), v = k && vehicle(k.vehicleId);
+    $("#tapped").innerHTML = `<div class="card result" style="border:2px solid var(--accent)">
+      <div class="found">🗂 ${esc(pegLabel(peg))}</div>
+      <div style="margin-top:8px">${k ? `Holds <a href="#/v/${k.vehicleId}/k/${k.id}"><span class="plate">${esc(v?.vrm || "?")}</span> key ${k.n}</a>` : `<span class="muted">Empty</span>`}</div>
+      <button class="danger" style="margin-top:8px;font-size:13px;color:var(--muted)" id="unpeg">Unregister peg sticker</button></div>`;
+    $("#unpeg").onclick = async () => {
+      if (!confirm(`Unregister the sticker on ${pegLabel(peg)}?`)) return;
+      await store.del("pegs", peg.id).catch(err => toast(err.message)); db.pegs = db.pegs.filter(x => x.id !== peg.id);
+      toast("✓ Peg sticker unregistered"); $("#tapped").innerHTML = "";
+    };
+  };
+  tapHandler = t => {
+    if (t.key) showKey(t.key);
+    else if (t.peg) showPeg(t.peg);
+    else { $("#tapped").innerHTML = `<div class="card muted">That sticker isn't registered. Use <b>Book in a vehicle</b> to register key stickers, or <b>Keys → Set up pegs</b> for peg stickers.</div>`; }
+    window.scrollTo(0, 0);
+  };
+
+  const showResults = () => {
+    const q = $("#hq").value, ks = matchingKeys(q);
+    $("#hresults").innerHTML = !normReg(q) ? "" : ks.length ? ks.map(k => { const v = vehicle(k.vehicleId);
+      return `<a class="vlink card row" href="#/v/${k.vehicleId}/k/${k.id}" style="margin-top:8px"><span class="plate">${esc(v.vrm)}</span>
+        <span class="grow">Key ${k.n}</span><span class="found">${esc(whereText(k))}</span></a>`; }).join("")
+      : `<div class="muted" style="margin-top:8px">No keys match "${esc(q)}"</div>`;
+  };
+  $("#hq").oninput = showResults;
 }
+let showKeyExternal = () => {}, homeShown = null;
 
 /* ---------- book in: vehicle details, then tap its keys ---------- */
 function viewBook() {
@@ -1150,7 +1225,7 @@ function render() {
   currentView = h.startsWith("#/map") ? "map" : "";
   if (currentView === "map") viewMap();
   else if (m) viewVehicle(m[1]);
-  else if (h.startsWith("#/do/")) viewDo(h.slice(5));
+  else if (h.startsWith("#/do/")) { location.replace("#/"); viewActions(); }
   else if (h.startsWith("#/pegs/")) viewPegSetup(h.slice(7));
   else if (h.startsWith("#/peg/")) viewPeg(h.slice(6));
   else if (h.startsWith("#/book")) viewBook();
@@ -1158,9 +1233,9 @@ function render() {
   else if (h.startsWith("#/vehicles")) viewVehicles();
   else viewActions();
 }
-const ownsNfc = h => /^#\/(do|pegs|book)\//.test(h) || h.startsWith("#/book");   // these pages run their own scanning
+const ownsNfc = h => /^#\/pegs\//.test(h) || h.startsWith("#/book");   // these pages run their own scanning
 function route() {
-  pegWaiter = null;
+  pegWaiter = null; tapHandler = null; homeShown = null;
   stopSession(); if (!ready) return; render(); window.scrollTo(0, 0);
   if (!ownsNfc(location.hash)) startIdle();
 }
