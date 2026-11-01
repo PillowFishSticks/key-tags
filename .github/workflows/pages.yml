@@ -3,6 +3,7 @@ name: Publish website
 on:
   push:
     branches: [main]
+    paths: ["index.html", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -36,25 +37,41 @@ jobs:
         with:
           path: _site
 
-      # GitHub sometimes still thinks the previous publish is running; wait and retry instead of failing
+      # GitHub sometimes keeps the previous publish "in progress" long after it finished; wait and retry instead of failing
       - id: try1
         uses: actions/deploy-pages@v4
         continue-on-error: true
 
-      - if: steps.try1.outcome == 'failure'
-        run: sleep 90
+      - if: steps.try1.outcome != 'success'
+        run: sleep 120
 
       - id: try2
-        if: steps.try1.outcome == 'failure'
+        if: steps.try1.outcome != 'success'
         uses: actions/deploy-pages@v4
         continue-on-error: true
 
-      - if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
-        run: sleep 180
+      - if: steps.try1.outcome != 'success' && steps.try2.outcome != 'success'
+        run: sleep 300
 
       - id: try3
-        if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+        if: steps.try1.outcome != 'success' && steps.try2.outcome != 'success'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - if: steps.try1.outcome != 'success' && steps.try2.outcome != 'success' && steps.try3.outcome != 'success'
+        run: sleep 600
+
+      - id: try4
+        if: steps.try1.outcome != 'success' && steps.try2.outcome != 'success' && steps.try3.outcome != 'success'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - if: steps.try1.outcome != 'success' && steps.try2.outcome != 'success' && steps.try3.outcome != 'success' && steps.try4.outcome != 'success'
+        run: sleep 900
+
+      - id: try5
+        if: steps.try1.outcome != 'success' && steps.try2.outcome != 'success' && steps.try3.outcome != 'success' && steps.try4.outcome != 'success'
         uses: actions/deploy-pages@v4
 
       - id: final
-        run: echo "url=${{ steps.try1.outputs.page_url || steps.try2.outputs.page_url || steps.try3.outputs.page_url }}" >> "$GITHUB_OUTPUT"
+        run: echo "url=${{ steps.try1.outputs.page_url || steps.try2.outputs.page_url || steps.try3.outputs.page_url || steps.try4.outputs.page_url || steps.try5.outputs.page_url }}" >> "$GITHUB_OUTPUT"
