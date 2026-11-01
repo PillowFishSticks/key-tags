@@ -207,6 +207,7 @@ function buzz(ok) { try { navigator.vibrate && navigator.vibrate(ok ? 80 : [60, 
 function keyStatus(k) {
   const e = lastEvent(k.id);
   if (!e) return `<span class="pill new">Not scanned yet</span>`;
+  if (e.action === "left") return `<span class="pill new">Left: ${esc(e.note)} (${esc(e.person)})</span>`;
   return e.action === "in"
     ? `<span class="pill in">On ${esc(e.location)}${e.peg ? " · peg " + e.peg : ""}</span>`
     : `<span class="pill out">With ${esc(holder(e))}</span>`;
@@ -215,6 +216,7 @@ function keyStatus(k) {
 function holder(e) { return e.action === "handover" ? e.to : e.person; }
 function describe(e, what) {
   if (e.action === "bookin") return `<b>${esc(e.person)}</b> booked in ${what}`;
+  if (e.action === "left") return `<b>${esc(e.person)}</b> left ${what} at <i>${esc(e.note)}</i>`;
   if (e.action === "handover" && e.taken) return `<b>${esc(e.to)}</b> took ${what} from <b>${esc(e.person)}</b>`;
   if (e.action === "handover") return `<b>${esc(e.person)}</b> handed ${what} to <b>${esc(e.to)}</b>`;
   const where = e.location ? ` ${e.action === "out" ? "from" : "on"} ${esc(e.location)}${e.peg ? " · peg " + e.peg : ""}` : "";
@@ -250,12 +252,12 @@ async function saveMove(k, action, extra) {
   const ev = { id: rid("e_"), keyId: k.id, vehicleId: k.vehicleId, action, location: "", peg: null, to: "", person: extra.person || me() || "Someone", at: Date.now(), ...extra };
   if (action === "out" && prev) { ev.location = prev.board; ev.peg = prev.peg; }
   await store.put("events", ev); db.events.push(ev);
-  stampPos(k, action === "in" ? "board" : "held"); ensureTracking();
+  stampPos(k, action === "in" || action === "left" ? "board" : "held"); ensureTracking();
   return ev;
 }
 
 /* who has a key right now (person name), or null if it's on a board / never scanned */
-function keyHolder(k) { const e = lastEvent(k.id); return e && e.action !== "in" ? holder(e) : null; }
+function keyHolder(k) { const e = lastEvent(k.id); return e && e.action !== "in" && e.action !== "left" ? holder(e) : null; }
 
 /* hand-overs wait for the other person to accept */
 let seenOffers = new Set();
@@ -404,7 +406,7 @@ const upsertPos = r => { const i = db.pos.findIndex(x => x.id === r.id); if (i >
 const posFor = kid => db.pos.find(p => p.id === "pos_" + kid);
 function myHeldKeys() {
   if (!me()) return [];
-  return db.keys.filter(k => { const e = lastEvent(k.id); return e && e.action !== "in" && holder(e) === me(); });
+  return db.keys.filter(k => keyHolder(k) === me());
 }
 function ensureTracking() {
   const held = myHeldKeys();
@@ -514,6 +516,7 @@ function keyActions(k) {
       <div class="qa" id="qa_${k.id}"></div>
       <div class="row" style="margin-top:8px;gap:8px">${PEOPLE.filter(p => p !== me()).map(p =>
         `<button class="grow" data-act="give" data-to="${p}" data-k="${k.id}">Give to ${p}</button>`).join("")}</div>
+      <button style="margin-top:8px;width:100%" data-act="left" data-k="${k.id}">📝 Left it somewhere</button>
       ${offer ? `<div class="muted" style="margin-top:6px">Waiting for ${esc(offer.to)} to accept</div>` : ""}` + unregLink(k);
   const label = place ? "Take it" : who ? `Take from ${esc(who)}` : "Take it";
   return `<button class="primary big" style="margin-top:10px" data-act="take" data-k="${k.id}">${label}</button>` + unregLink(k);
@@ -567,6 +570,7 @@ function whereText(k) {
   const e = lastEvent(k.id);
   if (!e) return "Not scanned yet";
   if (e.action === "in") return `${e.location}${e.peg ? " · peg " + e.peg : " · peg unknown"}`;
+  if (e.action === "left") return `Left: ${e.note}`;
   return `With ${holder(e)}`;
 }
 function viewKeys() {
@@ -576,6 +580,7 @@ function viewKeys() {
   for (const k of db.keys) {
     const e = lastEvent(k.id); if (!e) continue;
     if (e.action === "in") { if (!e.peg) { if (!loose.has(e.location)) loose.set(e.location, []); loose.get(e.location).push(k); } }
+    else if (e.action === "left") { if (!holding.has("Left somewhere")) holding.set("Left somewhere", []); holding.get("Left somewhere").push(k); }
     else { const h = holder(e); if (!holding.has(h)) holding.set(h, []); holding.get(h).push(k); }
   }
   const keyRow = k => { const v = vehicle(k.vehicleId);
@@ -717,6 +722,19 @@ function bindKeyActions(scope, again) {
         again(); return;
       }
       const box = scope.querySelector("#qa_" + k.id);
+      if (act === "left") {
+        b.outerHTML = `<div class="row" style="margin-top:8px;gap:8px"><input id="lnote_${k.id}" placeholder="Where? e.g. office desk" class="grow" autocomplete="off">
+          <button class="primary" id="lsave_${k.id}">Save</button></div>`;
+        const inp = scope.querySelector("#lnote_" + k.id); inp.focus();
+        const save = async () => {
+          const note = inp.value.trim(); if (!note) { inp.focus(); return; }
+          try { const ev = await saveMove(k, "left", { note, person: me() }); toast("✓ " + describe(ev, "key " + k.n).replace(/<[^>]+>/g, "")); again(); }
+          catch (err) { toast("Couldn't save: " + err.message); }
+        };
+        scope.querySelector("#lsave_" + k.id).onclick = save;
+        inp.onkeydown = ev => { if (ev.key === "Enter") save(); };
+        return;
+      }
       if (act === "puton") {
         const manual = () => {
           box.innerHTML = `<div class="muted" style="margin-top:10px">Which board?</div>
@@ -1298,9 +1316,10 @@ function mapGroups() {
   for (const k of (normReg(mapQuery) ? matchingKeys(mapQuery) : db.keys)) {
     const e = lastEvent(k.id), p = posFor(k.id);
     if (!e || !p) continue;
-    const onBoard = e.action === "in";
-    const gid = onBoard ? "b:" + e.location : "p:" + holder(e);
-    if (!groups.has(gid)) groups.set(gid, { name: onBoard ? e.location : holder(e), onBoard, keys: [], pos: p });
+    const onBoard = e.action === "in" || e.action === "left";
+    const label = e.action === "in" ? e.location : e.action === "left" ? "Left: " + e.note : holder(e);
+    const gid = (e.action === "in" ? "b:" : e.action === "left" ? "l:" + e.id : "p:") + label;
+    if (!groups.has(gid)) groups.set(gid, { name: label, onBoard, keys: [], pos: p });
     const g = groups.get(gid); g.keys.push(k);
     if (p.at > g.pos.at) g.pos = p;
   }
